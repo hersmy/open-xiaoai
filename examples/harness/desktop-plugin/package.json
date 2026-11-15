@@ -1,0 +1,10 @@
+{
+  "name": "dsh-xiaoai-voice",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "index.js",
+  "description": "小米音箱语音专用桌面会话",
+  "dsh": { "bundle": { "patch": "./cordis.patch.yml" }, "manifestVersion": 1 },
+  "scripts": { "test": "node --test test.mjs" }
+}

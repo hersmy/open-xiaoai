@@ -1,3 +1,18 @@
+# 本机 LX06 / DeepSeek Harness 开发入口
+
+本地功能：说 **“大爱同学”**，等“我在”后提问，交给本机 DeepSeek Harness Agent 思考并由音箱播报。
+现场用户已确认唤醒、问题和回答成功。普通“小爱同学”保留；每轮仍需唤醒，回复可能需几十秒。
+
+- [项目交接、路径和实测状态](docs/LOCAL_HANDOFF.md)
+- [运行、停止、桌面会话插件和调试](examples/harness/README.md)
+- [后续 Agent 规则](AGENTS.md)
+
+有效运行源码位于 `/Users/zhangyichi/codex/open-xiaoai-lx06`。
+用户的 Harness 工作区在 `/Volumes/PHILIPS/小米音箱`；该目录根 README/AGENTS 指向此处。
+下方保留上游说明；上游归档不代表本地扩展已同步到 GitHub。
+
+---
+
 > [!WARNING]
 > 本项目已停止维护，不再提供更新与支持，感谢大家的使用。
 
