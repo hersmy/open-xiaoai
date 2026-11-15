@@ -7,6 +7,7 @@
 - [项目交接、路径和实测状态](docs/LOCAL_HANDOFF.md)
 - [运行、停止、桌面会话插件和调试](examples/harness/README.md)
 - [本地 NCM/MP3 与代码在线点歌](examples/harness/README.md#本地音乐)
+- [Bilibili 指定视频代码搜索与客户端播放](examples/harness/README.md#bilibili-指定视频)
 - [后续 Agent 规则](AGENTS.md)
 
 有效运行源码位于 `/Users/zhangyichi/codex/open-xiaoai-lx06`。

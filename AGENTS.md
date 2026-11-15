@@ -21,3 +21,4 @@
 - “退下”由代码精确匹配，原声“收到”后清掉收音/重开麦/待执行指令和近期接管上下文，等待下次唤醒；不调用 Agent、不暂停音乐、不删除会话。在线搜索不可播或歌手/版本不匹配时明确报错，不自动替换翻唱。
 - 语音服务重启不会停止独立 mediaplayer：必须保留恢复前后的原生播放器暂停；迟到 AudioPlayer.Play 只按短期自定义 ASR dialog_id 异步拦截，不全局拦原生会话，也不能在 WebSocket 事件读取中 await 同连接 RPC。
 - 点歌按通用歌手/歌名元数据匹配，不逐首硬编码；不要用裸“如果”排除歌名。复杂音乐需求由 Agent 判断选曲后仍调用 netease_music.py CLI，禁止用 computer use 搜索/点击播放器。
+- 明确 B 站视频用 examples/harness/bilibili_video.py：公共元数据搜索/查 BV，再 bilipc://page/player 原生打开，不用 computer use；标题不唯一要 BV。视频动作用 .runtime/video-actions.jsonl，opened 仅代表调用被接受；本次仅普通 UGC 第一分 P 点播，音乐暂停/继续仍是网易云。

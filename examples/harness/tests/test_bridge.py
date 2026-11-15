@@ -182,6 +182,24 @@ class HarnessTests(unittest.IsolatedAsyncioTestCase):
         runner.run.assert_not_awaited()
         self.assertEqual(bridge.last_turn['music_source'], 'netease_online')
 
+    async def test_explicit_bilibili_video_skips_music_and_agent_and_records_own_journal(self):
+        runner = AsyncMock()
+        with tempfile.TemporaryDirectory() as tmp:
+            bridge = Bridge('192.0.2.1', runner, state_dir=tmp)
+            bridge.restore_native_voice = AsyncMock()
+            bridge.say = AsyncMock()
+            with patch('bridge.video_request', return_value={'handled': True, 'ok': True,
+                    'status': 'opened', 'silent': True, 'source': 'bilibili', 'message': '已打开视频'}) as video, \
+                 patch('bridge.music_request') as music:
+                await bridge.dialog('播放视频BV18V4i6WEje')
+            video.assert_called_once()
+            music.assert_not_called()
+            runner.run.assert_not_awaited()
+            bridge.say.assert_not_awaited()
+            self.assertEqual(bridge.last_turn['route'], 'local_video')
+            self.assertTrue((Path(tmp) / 'video-actions.jsonl').is_file())
+            self.assertFalse((Path(tmp) / 'music-actions.jsonl').exists())
+
     async def test_query_uses_fixed_answer_and_compound_request_uses_agent(self):
         runner = AsyncMock()
         runner.run.return_value = '复杂请求处理完成'

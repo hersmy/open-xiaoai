@@ -270,3 +270,38 @@ Agent 阶段约 117.6 秒，不能把这个误分流当成每次联网点歌必�
 
 修复后的精确原话后台重测：agent_called=false，搜索约 0.74 秒、调用网易云约 0.46 秒，
 含原声提示和语音恢复整轮约 4.11 秒，不含云端 ASR；status=opened 不等同出声测量。
+
+
+## Bilibili 指定视频
+
+本机 `/Applications/哔哩哔哩.app` 是官方 Mac 客户端 1.17.6，注册 scheme 为 bilipc。
+新增 `bilibili_video.py`，明确视频走 `route=local_video`，不经过 Agent：
+
+- “在B站播放女生视角告诉你，女生是怎么感受到被爱的”：按标题搜索，精确匹配优先。
+- “播放视频BV18V4i6WEje”：指定 BV，跳过搜索并查询详情。
+- `--command '播放https://www.bilibili.com/video/BV18V4i6WEje'`：接收普通视频链接，丢弃跟踪参数。
+
+CLI：
+
+```sh
+cd /Users/zhangyichi/codex/open-xiaoai-lx06/examples/harness
+.venv/bin/python bilibili_video.py --command '在B站播放女生视角告诉你，女生是怎么感受到被爱的'
+```
+
+代码请求 B 站官方域名上的公开元数据；搜索使用由 finger/spi 生成的新匿名 buvid3，仅在进程内缓存，
+不读浏览器或客户端 Cookie、不复制账号凭据。接口对标题标点处理不同，搜索关键词将标点替换为空格，
+匹配时仍核对完整标题。标题含“怎么”或逗号不当作复杂请求；结果不唯一要求 BV，不盲目播放第一项。
+查询到 aid/cid/bvid 后用 `bilipc://page/player?type=ugc&bvid=...&aid=...&cid=...` 调用原生客户端。
+该实际路径已从本机代码核对，并由用户确认打开且播放了指定视频；手机 bilibili:// 和 bilipc://video 路径不等价。
+
+沿用小爱原声“收到→已完成”和 AIVS/PNS 恢复/迟到原生播放暂停。仅重载桥接，不重启整个 Harness。
+`last_turn` 含 `video_source`、`video_search_ms`、`video_metadata_ms`、`video_open_ms`、`video_command_ms`；
+快速动作记自有 `.runtime/video-actions.jsonl`，不制造桌面 Agent 轮次。推荐、复杂筛选/复合要求仍走 Agent。
+系统 open 成功只记 opened，不以此推断每次实际出声；这次指定视频的出声有独立用户确认。
+
+本次范围是普通 UGC 第一分 P 的搜索点播，不是客户端完整遥控；非第一分 P 明确提示尚未验证，
+不偷偷改播第一集。短链、番剧/付费内容及播放控制尚未接入；现有“暂停播放/继续播放”仍控制网易云。
+音视频下载、私有 API 凭据、第三方播放器均不在此路径中。接口风控或视频下架时给固定错误，不调用 Agent 重试。
+
+验证：73 个 Python、5 个 Node 测试通过；标题搜索实查返回用户指定 BV18V4i6WEje，
+元数据标题与用户提供一致；用户确认原生 URL 打开并播放正确视频。后台完整入口结果另记交接文档。

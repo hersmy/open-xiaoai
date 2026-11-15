@@ -22,6 +22,7 @@ from netease_music import parse_command as music_command, request as music_reque
 from feedback import prepare as prepare_feedback, install_script as feedback_install, play_script as feedback_play, open_asr_script
 from voice_config import WAKE_PHRASE
 from voice_commands import dismiss_command
+from bilibili_video import parse_command as video_command, request as video_request
 
 ROOT = Path(__file__).resolve().parent
 DEFAULT_DSH = "/Applications/DeepSeek Harness.app/Contents/Resources/runtime/cli/bin/dsh"
@@ -619,9 +620,9 @@ class Bridge:
         now = time.monotonic()
         active = now < self.listening_until
         without_echo = re.sub(r'^[哎诶唉][，,。！!：:\s]*', '', cleaned)
-        if active and without_echo != cleaned and (music_command(without_echo) or dismiss_command(without_echo)):
+        if active and without_echo != cleaned and (music_command(without_echo) or video_command(without_echo) or dismiss_command(without_echo)):
             cleaned = without_echo
-        command = music_command(cleaned)
+        command = video_command(cleaned) or music_command(cleaned)
         if active and cleaned.rstrip('，,。！!：: ') in {'', '哎', '诶', '唉', '小爱同学'}:
             self.last_recognition = {'decision': 'ignored_greeting'}
             LOG.info('Ignored wake-only/greeting ASR; listening remains open')
@@ -657,7 +658,7 @@ class Bridge:
             self.wake_job.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await self.wake_job
-        if self.job and not self.job.done() and self.last_turn and self.last_turn['route'] == 'local_music':
+        if self.job and not self.job.done() and self.last_turn and self.last_turn['route'] in {'local_music', 'local_video'}:
             # Do not cancel PNS recovery or block the WebSocket reader on RPC.
             self.pending_question = question
             self.last_recognition['decision'] = 'queued_after_local_recovery'
@@ -700,8 +701,11 @@ class Bridge:
                 await recovery
                 self.completed += 1
                 return '已退出本轮收音，等待下一次唤醒。'
-            if music_command(question) is not None:
-                metrics['route'] = 'local_music'
+            video = video_command(question)
+            if video is not None or music_command(question) is not None:
+                kind = 'video' if video is not None else 'music'
+                execute = video_request if video is not None else music_request
+                metrics['route'] = 'local_' + kind
                 # Stop stock replies and restore capture state while the Mac
                 # opens the file; playback need not wait for frontend recovery.
                 recovery = asyncio.create_task(self.timed(metrics, 'native_recovery_ms', self.restore_native_voice()))
@@ -709,17 +713,17 @@ class Bridge:
                 owned.append(recovery)
                 await self.timed(metrics, 'receipt_ms', self.feedback('received'))
                 metrics['spoken'] = True
-                playback = asyncio.create_task(self.timed(metrics, 'music_command_ms',
-                    asyncio.to_thread(music_request, question)))
+                playback = asyncio.create_task(self.timed(metrics, kind + '_command_ms',
+                    asyncio.to_thread(execute, question)))
                 owned.append(playback)
                 result = await playback
                 local_result = result
-                metrics.update({'music_' + key: value for key, value in result.get('timing', {}).items()})
+                metrics.update({kind + '_' + key: value for key, value in result.get('timing', {}).items()})
                 metrics['command_result_after_ms'] = round((time.monotonic() - started) * 1000, 1)
                 metrics['status'] = result.get('status', 'answered' if result.get('ok') else 'failed')
-                metrics['music_source'] = result.get('source', 'local')
+                metrics[kind + '_source'] = result.get('source', 'local')
                 metrics['ok'] = bool(result.get('ok'))
-                LOG.info('Local music result: %s', json.dumps(metrics))
+                LOG.info('Local %s result: %s', kind, json.dumps(metrics))
                 if result.get('ok'):
                     await self.timed(metrics, 'confirmation_ms', self.feedback('done'))
                     metrics['confirmed'] = True
@@ -781,7 +785,7 @@ class Bridge:
                     self.native_recovery = None
             metrics['total_ms'] = round((time.monotonic() - started) * 1000, 1)
             if local_result is not None:
-                self.record_music_action(question, local_result, metrics)
+                self.record_local_action(question, local_result, metrics)
             LOG.info('Turn timing: %s', json.dumps(metrics))
 
     @staticmethod
@@ -792,13 +796,13 @@ class Bridge:
         finally:
             metrics[name] = round((time.monotonic() - started) * 1000, 1)
 
-    def record_music_action(self, question, result, metrics):
+    def record_local_action(self, question, result, metrics):
         if self.state_dir is None:
             return
         entry = {"time": time.time(), "command": question, "result": result, "timing": dict(metrics)}
         try:
             self.state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-            path = self.state_dir / 'music-actions.jsonl'
+            path = self.state_dir / ('video-actions.jsonl' if metrics['route'] == 'local_video' else 'music-actions.jsonl')
             fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
             with os.fdopen(fd, 'a') as stream:
                 stream.write(json.dumps(entry, ensure_ascii=False) + '\n')

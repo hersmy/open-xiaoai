@@ -368,3 +368,36 @@ Mac 网易云接受对应在线播放，音箱原生状态=2。search=462.9 ms�
 只重载本桥接，原生暂停/迟到播放守卫与退下逻辑保留。后台精确原话“播放许嵩的如果当时”重测成功：route=local_music、music_source=netease_online、
 agent_called=false、status=opened。搜索 741.8 ms、调用网易云 457.7 ms，整轮 4111.0 ms
 （含收到/已完成和语音恢复，不含云端 ASR，不等同实际出声计时）。
+
+
+## 2026-11-15 Bilibili 指定视频代码点播
+
+用户希望在本地 Bilibili 搜索播放指定视频，提供 BV18V4i6WEje：
+《女生视角告诉你，女生是怎么感受到被爱的》。本机官方客户端 1.17.6，
+`/Applications/哔哩哔哩.app`，bundle=com.bilibili.bilibiliPC，注册 scheme=bilipc。
+只读检查本机 App 代码后确认实际入口是 bilipc://page/player（type=ugc、bvid、aid、cid），
+手机 bilibili:// 和猜测的 bilipc://video 等只唤起首页，不能据此宣称播放。
+用户已确认正确入口打开并播放了指定视频。没有修改客户端或拷贝/输出用户登录凭据。
+
+新增 bilibili_video.py：BV/常规链接直接查 view 元数据，标题通过公开 search/type 搜索；
+搜索需要由 finger/spi 生成的新匿名 buvid3，只在进程内存缓存，不读浏览器/App Cookie。
+标点转空格作为检索关键词，完整标题仍按归一化文本核对；精确匹配优先，长的包含匹配必须唯一，
+否则提示提供 BV，不盲目播放首项。直接链接的 vd_source 等跟踪参数不传客户端。
+仅验证普通 UGC 第一分 P，显式 p!=1 报尚未验证，不能悄悄播第一集；短链、番剧与客户端遥控未接入。
+
+bridge 在音乐之前分流明确视频，route=local_video、video_source=bilibili，先收到再代码执行、
+成功已完成；失败固定提示，不调用 Agent 重试。推荐/复杂要求仍进 Agent。
+恢复前后暂停原生播放器、AIVS/PNS 配套恢复和短期 ASR dialog_id 迟到播放守卫继续保留。
+自有 .runtime/video-actions.jsonl 保存轻量动作，不写 Harness 内部会话，不制造 Agent 思考轮次。
+现有暂停/继续仍操作网易云，不能据此宣称 Bilibili 完整语音遥控已接通。
+
+73 个 Python、5 个 Node 测试通过；标点检索修正后专项 45 项测试通过。
+真实元数据确认 aid=117567549082566、cid=43371006088、标题与用户一致；
+原生 URL 的客户端实际播放已由用户确认。完整后台标题入口重测成功：
+route=local_video、agent_called=false、status=opened、video_source=bilibili，
+search=758.3 ms、metadata=956.7 ms、open=2269.3 ms、command=3228.5 ms、
+含原声提示/恢复整轮 6065.9 ms，不含云端 ASR，不作为每次时延或出声时间保证。
+仅重载本桥接，原桌面语音会话继续复用，未重启 Harness 或刷固件。
+
+探索时读取的 App 代码及临时解码脚本只用于核对协议，已从自建 .runtime/bilibili-probe 清理；
+没有提交第三方 App 源码、音视频、匿名标识、日志、权重或凭据。
