@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { authorized, finalText, start } from './index.js';
+import { authorized, finalText, start, TURN_TIMEOUT_MS } from './index.js';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -8,6 +8,9 @@ import { EventEmitter } from 'node:events';
 test('requires exact bearer token; rejects missing or wrong length', () => {
   assert.equal(authorized('Bearer correct', 'correct'), true);
   for (const wrong of [undefined, '', 'correct', 'Bearer bad']) assert.equal(authorized(wrong, 'correct'), false);
+});
+test('desktop tool turns have a thirty-minute deadline', () => {
+  assert.equal(TURN_TIMEOUT_MS, 1800000);
 });
 test('never speaks reasoning or tool-call intermediate message', () => {
   const event = content => ({ type: 'assistant/message', data: { message: { content } } });

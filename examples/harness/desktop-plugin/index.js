@@ -6,6 +6,7 @@ import path from 'node:path';
 
 export const name = 'xiaoai-voice';
 export const inject = ['agents', 'sessionController', 'workspaceRegistry'];
+export const TURN_TIMEOUT_MS = 30 * 60 * 1000;
 const runtime = fileURLToPath(new URL('../.runtime/', import.meta.url));
 const project = '/Volumes/PHILIPS/小米音箱';
 
@@ -81,10 +82,14 @@ export async function start(ctx, runtime, project) {
         }, { global: true });
         cancel = () => {
           resolved.agent.cancel({ kind: 'user' }, { keepInbox: false });
-          reject(new Error('Voice turn cancelled'));
+          reject(new Error('VOICE_CANCELLED: 语音任务已中断'));
         };
         signal.addEventListener('abort', cancel, { once: true });
-        timer = setTimeout(cancel, 180000);
+        timer = setTimeout(() => {
+          // Report our own deadline rather than mislabel it as a human cancel.
+          reject(new Error('VOICE_TIMEOUT: 任务已达到三十分钟上限，请在 Harness 查看执行情况'));
+          resolved.agent.cancel({ kind: 'user' }, { keepInbox: false });
+        }, TURN_TIMEOUT_MS);
       });
       // Attach a rejection handler before awaiting prompt admission.
       done.catch(() => {});
@@ -112,7 +117,8 @@ export async function start(ctx, runtime, project) {
     res.on('close', () => { if (!res.writableEnded) abort.abort(); });
     try {
       if (req.method === 'GET' && req.url === '/health') {
-        json(200, { ready: true, session_id: sessionId, workspace: project, busy }); return;
+        json(200, { ready: true, session_id: sessionId, workspace: project, busy,
+                    version: '0.2.0', turn_timeout_ms: TURN_TIMEOUT_MS }); return;
       }
       if (req.method !== 'POST' || req.url !== '/ask') { json(404, { error: 'Not found' }); return; }
       let size = 0, chunks = [];

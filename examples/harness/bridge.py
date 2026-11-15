@@ -17,7 +17,7 @@ import signal
 import time
 import uuid
 
-from aiohttp import ClientSession, WSMsgType, web
+from aiohttp import ClientSession, ClientTimeout, WSMsgType, web
 
 ROOT = Path(__file__).resolve().parent
 DEFAULT_DSH = "/Applications/DeepSeek Harness.app/Contents/Resources/runtime/cli/bin/dsh"
@@ -161,7 +161,8 @@ class DesktopRunner:
         url = descriptor["url"]
         if not url.startswith("http://127.0.0.1:"):
             raise RuntimeError("Desktop endpoint must be loopback")
-        async with ClientSession(headers={"Authorization": "Bearer " + descriptor["token"]}) as session:
+        async with ClientSession(headers={"Authorization": "Bearer " + descriptor["token"]},
+                                 timeout=ClientTimeout(total=1830, sock_connect=5)) as session:
             async with session.post(url + "/ask", json={"text": text}) as response:
                 data = await response.json()
                 if response.status != 200:
@@ -482,7 +483,7 @@ class Bridge:
                 await self.say("我在。请说小爱同学，问助手，加上你的问题。")
                 return "等待问题"
             await self.say("我想一想。")
-            answer = await self.runner.run(question)
+            answer = await self.run_with_feedback(question)
             await self.say(answer)
             self.completed += 1
             self.last_error = None
@@ -495,8 +496,38 @@ class Bridge:
             self.last_error = type(exc).__name__ + ": " + str(exc)
             LOG.error("Assistant turn failed: %s", self.last_error)
             with contextlib.suppress(Exception):
-                await self.say("这次助手连接遇到问题，请稍后再试。")
+                await self.say(self.failure_message(exc))
             raise
+
+    @staticmethod
+    def failure_message(exc):
+        detail = str(exc)
+        if "VOICE_TIMEOUT" in detail:
+            return "这项任务已达到三十分钟上限，请在电脑的语音对话窗口查看执行情况。"
+        if "VOICE_CANCELLED" in detail or "Voice turn cancelled" in detail:
+            return "这项任务被中断了，请在电脑的语音对话窗口查看执行情况。"
+        if "busy" in detail.lower() or "already running" in detail.lower():
+            return "助手会话正在处理其他输入，请等它完成后再试。"
+        if isinstance(exc, asyncio.TimeoutError):
+            return "等待助手回复超时，请在电脑的语音对话窗口查看执行情况。"
+        return "这次助手处理没有完成，请在电脑的语音对话窗口查看具体原因。"
+
+    async def run_with_feedback(self, question, interval=45):
+        task = asyncio.create_task(self.runner.run(question))
+        try:
+            # Slow tool work remains one owned task. Feedback never resubmits it.
+            while True:
+                done, _ = await asyncio.wait({task}, timeout=interval)
+                if done:
+                    return await task
+                with contextlib.suppress(Exception):
+                    await self.say("我还在处理这项任务，完成后会告诉你。")
+                interval = 120
+        finally:
+            if not task.done():
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await task
 
     async def health(self, request):
         return web.json_response({"speaker_connected": self.ws is not None and not self.ws.closed,
@@ -579,7 +610,7 @@ async def main():
     parser.add_argument("--status", action="store_true")
     args = parser.parse_args()
     if args.ask or args.status:
-        async with ClientSession() as session:
+        async with ClientSession(timeout=ClientTimeout(total=1900 if args.ask else 10)) as session:
             if args.ask:
                 response = await session.post(f"http://127.0.0.1:{args.control_port}/ask", json={"text": args.ask})
             else:

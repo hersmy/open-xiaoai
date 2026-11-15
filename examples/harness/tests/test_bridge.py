@@ -41,6 +41,40 @@ class ProtocolTests(unittest.TestCase):
 
 
 class HarnessTests(unittest.IsolatedAsyncioTestCase):
+    async def test_slow_task_feedback_does_not_restart_agent(self):
+        async def slow_answer(text):
+            await asyncio.sleep(.06)
+            return "完成"
+        runner = AsyncMock()
+        runner.run.side_effect = slow_answer
+        bridge = Bridge("192.0.2.1", runner)
+        bridge.say = AsyncMock()
+        self.assertEqual(await bridge.run_with_feedback("任务", interval=.01), "完成")
+        runner.run.assert_awaited_once_with("任务")
+        bridge.say.assert_awaited_once()
+
+    async def test_cancel_feedback_cancels_owned_agent_call(self):
+        stopped = asyncio.Event()
+        async def wait_forever(text):
+            try:
+                await asyncio.sleep(60)
+            finally:
+                stopped.set()
+        runner = AsyncMock()
+        runner.run.side_effect = wait_forever
+        bridge = Bridge("192.0.2.1", runner)
+        task = asyncio.create_task(bridge.run_with_feedback("任务"))
+        await asyncio.sleep(.02)
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        self.assertTrue(stopped.is_set())
+
+    def test_timeout_is_not_reported_as_connection_failure(self):
+        self.assertIn("三十分钟", Bridge.failure_message(RuntimeError("VOICE_TIMEOUT")))
+        self.assertIn("中断", Bridge.failure_message(RuntimeError("Voice turn cancelled")))
+        self.assertIn("其他输入", Bridge.failure_message(RuntimeError("Voice session busy")))
+
     async def test_native_interrupt_recovers_frontend_too(self):
         bridge = Bridge("192.0.2.1", None)
         bridge.rpc = AsyncMock(return_value={"exit_code": 0})
