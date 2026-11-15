@@ -13,6 +13,8 @@ import subprocess
 import time
 import uuid
 import tempfile
+from netease_online import request as online_request
+from voice_config import WAKE_PHRASE
 
 ROOT = Path(os.getenv("XIAOAI_MUSIC_DIR", "/Volumes/PHILIPS/小米音箱/music"))
 APP = "/Applications/NeteaseMusic.app"
@@ -104,7 +106,7 @@ def select(query, songs):
 
 def parse_command(text):
     """Accept simple music requests only; leave compound/inferential work to the Agent."""
-    text = re.sub(r"^(?:大爱同学|小爱同学)[，,：:\s]*", "", text.strip())
+    text = re.sub('^(?:' + re.escape(WAKE_PHRASE) + r'|大爱同学|小爱同学)[，,：:\s]*', '', text.strip())
     text = text.rstrip("。！？!?，, ")
     bare = re.sub(r'^(?:请帮我|帮我|请)', '', text)
     for action, phrases in CONTROLS.items():
@@ -120,10 +122,11 @@ def parse_command(text):
     if re.search(r"[,，;；。]|推荐|适合|根据|分析|整理|搜索|上网|下载|创建|生成|歌单|然后|并且|同时|再帮|顺便|如果|为什么|怎么|如何|什么|哪些|并(?:帮|把|关|开|执行|告诉|播放|给)|接着|之后|之前", match[1]):
         return None
     query = re.sub(r"^(?:网易云音乐|网易云|本地的|本地)[的，,\s]*", "", match[1]).strip()
-    return {"kind": "play", "query": query}
+    return {"kind": "play", "query": query, 'local_only': match[1].startswith(('本地', '本地的'))}
 
 
-def request(text, root=ROOT, opener=subprocess.run, state_path=None, controller=control_player):
+def request(text, root=ROOT, opener=subprocess.run, state_path=None, controller=control_player,
+            online=online_request):
     command = parse_command(text)
     if command is None:
         return {"handled": False}
@@ -155,6 +158,14 @@ def request(text, root=ROOT, opener=subprocess.run, state_path=None, controller=
     else:
         song = select(command['query'], songs)
     if song is None:
+        if not command.get('local_only'):
+            result = online(command['query'], opener=opener)
+            if result.get('ok') and result.get('track'):
+                try:
+                    save_track(state_path, result['track'])
+                except OSError:
+                    pass  # Never repeat a playback request because bookkeeping failed.
+            return result
         return {"handled": True, "ok": False, "message": "本地曲库未找到这首歌，请说出文件中的歌名或歌手。"}
     try:
         opened = time.monotonic()

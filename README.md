@@ -1,11 +1,12 @@
 # 本机 LX06 / DeepSeek Harness 开发入口
 
 本地功能：说 **“你好小七”**，等“哎”后发出指令；先回复“收到”，代码执行成功说“已完成”，复杂问题交给本机 DeepSeek Harness 后播报答案。全部使用小爱原音色。
+已支持本地优先、未命中时纯代码在线搜索点歌；说“退下”直接结束本轮，不调用 Agent。
 现场用户已确认唤醒、问题和回答成功。普通“小爱同学”保留；每轮仍需唤醒，回复可能需几十秒。
 
 - [项目交接、路径和实测状态](docs/LOCAL_HANDOFF.md)
 - [运行、停止、桌面会话插件和调试](examples/harness/README.md)
-- [本地 NCM/MP3 点歌与网易云播放](examples/harness/README.md#本地音乐)
+- [本地 NCM/MP3 与代码在线点歌](examples/harness/README.md#本地音乐)
 - [后续 Agent 规则](AGENTS.md)
 
 有效运行源码位于 `/Users/zhangyichi/codex/open-xiaoai-lx06`。

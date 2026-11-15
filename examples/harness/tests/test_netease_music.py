@@ -108,7 +108,33 @@ class MusicTests(unittest.TestCase):
             opener = Mock()
             root = Path(tmp)
             self.assertFalse(request("播放新闻", root, opener)['handled'])
-            self.assertFalse(request("播放不存在的歌", root, opener)['ok'])
+            online = Mock(return_value={'handled': True, 'ok': False, 'status': 'not_found', 'message': '未找到'})
+            self.assertFalse(request("播放不存在的歌", root, opener, online=online)['ok'])
+            online.assert_called_once_with('不存在的歌', opener=opener)
+            opener.assert_not_called()
+
+    def test_local_hit_and_explicit_local_miss_never_search_online(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / '许嵩 - 有何不可.ncm').write_bytes(b'audio')
+            online = Mock()
+            opener = Mock(return_value=SimpleNamespace(returncode=0))
+            self.assertTrue(request('你好小七，播放许嵩的有何不可', root, opener, online=online)['ok'])
+            self.assertFalse(request('播放本地不存在的歌', root, opener, online=online)['ok'])
+            online.assert_not_called()
+
+    def test_online_track_replaces_local_pointer_so_skip_cannot_use_stale_song(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / '许嵩 - 有何不可.ncm').write_bytes(b'audio')
+            state = root / 'state.json'
+            opener = Mock(return_value=SimpleNamespace(returncode=0))
+            request('播放有何不可', root, opener, state_path=state)
+            online = Mock(return_value={'handled': True, 'ok': True, 'status': 'opened',
+                'track': {'id': 66842, 'title': '十年', 'artist': '陈奕迅', 'source': 'netease_online'}})
+            request('播放陈奕迅的十年', root, opener, state_path=state, online=online)
+            opener.reset_mock()
+            self.assertFalse(request('下一首', root, opener, state_path=state)['ok'])
             opener.assert_not_called()
 
     def test_external_symlink_is_not_indexed(self):

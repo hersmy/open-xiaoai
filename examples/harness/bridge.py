@@ -21,6 +21,7 @@ from aiohttp import ClientSession, ClientTimeout, WSMsgType, web
 from netease_music import parse_command as music_command, request as music_request
 from feedback import prepare as prepare_feedback, install_script as feedback_install, play_script as feedback_play, open_asr_script
 from voice_config import WAKE_PHRASE
+from voice_commands import dismiss_command
 
 ROOT = Path(__file__).resolve().parent
 DEFAULT_DSH = "/Applications/DeepSeek Harness.app/Contents/Resources/runtime/cli/bin/dsh"
@@ -561,7 +562,7 @@ class Bridge:
         now = time.monotonic()
         active = now < self.listening_until
         without_echo = re.sub(r'^[哎诶唉][，,。！!：:\s]*', '', cleaned)
-        if active and without_echo != cleaned and music_command(without_echo):
+        if active and without_echo != cleaned and (music_command(without_echo) or dismiss_command(without_echo)):
             cleaned = without_echo
         command = music_command(cleaned)
         if active and cleaned.rstrip('，,。！!：: ') in {'', '哎', '诶', '唉', '小爱同学'}:
@@ -575,7 +576,7 @@ class Bridge:
         if active:
             question = cleaned
             decision = 'custom_window'
-        elif now < self.control_followup_until and command and command['kind'] in {'pause', 'resume'}:
+        elif now < self.control_followup_until and (dismiss_command(cleaned) or command and command['kind'] in {'pause', 'resume'}):
             question = cleaned
             decision = 'recent_wake_control'
         else:
@@ -586,6 +587,9 @@ class Bridge:
             LOG.info('Final ASR ignored: %s', json.dumps(self.last_recognition))
             return
         self.listening_until = 0
+        if dismiss_command(question):
+            self.control_followup_until = 0
+            self.pending_question = None
         await self.cancel_listen_timer()
         await self.cancel_rearm()
         LOG.info("Routed final ASR event to command dispatcher")
@@ -623,6 +627,22 @@ class Bridge:
         local_result = None
         try:
             self.last_error = None
+            if dismiss_command(question):
+                metrics['route'] = 'local_control'
+                self.listening_until = 0
+                self.control_followup_until = 0
+                self.pending_question = None
+                await self.cancel_listen_timer()
+                await self.cancel_rearm()
+                self.clear_audio()
+                recovery = asyncio.create_task(self.timed(metrics, 'native_recovery_ms', self.restore_native_voice()))
+                self.native_recovery = recovery
+                owned.append(recovery)
+                await self.timed(metrics, 'receipt_ms', self.feedback('received'))
+                metrics.update(spoken=True, status='dismissed', ok=True, reply_tts=False)
+                await recovery
+                self.completed += 1
+                return '已退出本轮收音，等待下一次唤醒。'
             if music_command(question) is not None:
                 metrics['route'] = 'local_music'
                 # Stop stock replies and restore capture state while the Mac
@@ -640,6 +660,7 @@ class Bridge:
                 metrics.update({'music_' + key: value for key, value in result.get('timing', {}).items()})
                 metrics['command_result_after_ms'] = round((time.monotonic() - started) * 1000, 1)
                 metrics['status'] = result.get('status', 'answered' if result.get('ok') else 'failed')
+                metrics['music_source'] = result.get('source', 'local')
                 metrics['ok'] = bool(result.get('ok'))
                 LOG.info('Local music result: %s', json.dumps(metrics))
                 if result.get('ok'):

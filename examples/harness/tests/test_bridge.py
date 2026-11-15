@@ -8,9 +8,16 @@ import unittest
 from unittest.mock import AsyncMock, patch
 
 from bridge import Bridge, HarnessRunner, AutoRunner, recognize, route, speech_text, tts_script, tts_completed
+from voice_commands import dismiss_command
 
 
 class ProtocolTests(unittest.TestCase):
+    def test_dismiss_is_exact_and_does_not_swallow_other_requests(self):
+        for text in ['退下', '退下吧。', '你好小七，退下', '小七，退下吧']:
+            self.assertTrue(dismiss_command(text))
+        for text in ['退下是什么意思', '退下后播放音乐', '告诉我退下的意思']:
+            self.assertFalse(dismiss_command(text))
+
     def test_only_final_recognition_is_routed(self):
         line = {"header": {"id": "one", "namespace": "SpeechRecognizer", "name": "RecognizeResult"},
                 "payload": {"is_final": True, "results": [{"text": "问助手你好"}]}}
@@ -45,6 +52,44 @@ class HarnessTests(unittest.IsolatedAsyncioTestCase):
         feedback_patch = patch.object(Bridge, 'feedback', new_callable=AsyncMock)
         self.feedback = feedback_patch.start()
         self.addCleanup(feedback_patch.stop)
+
+    async def test_dismiss_ends_capture_and_pending_control_without_agent_or_player(self):
+        runner = AsyncMock()
+        bridge = Bridge('192.0.2.1', runner)
+        bridge.say = AsyncMock()
+        bridge.restore_native_voice = AsyncMock()
+        bridge.listening_until = time.monotonic() + 20
+        bridge.control_followup_until = time.monotonic() + 20
+        bridge.pending_question = '继续播放'
+        timer = bridge.listen_timer = asyncio.create_task(asyncio.sleep(60))
+        with patch('bridge.music_request') as execute:
+            await bridge.dialog('退下。')
+        self.assertEqual(bridge.listening_until, 0)
+        self.assertEqual(bridge.control_followup_until, 0)
+        self.assertIsNone(bridge.pending_question)
+        self.assertTrue(timer.cancelled())
+        runner.run.assert_not_awaited()
+        execute.assert_not_called()
+        bridge.say.assert_not_awaited()
+        self.assertEqual(bridge.last_turn['route'], 'local_control')
+        self.assertEqual(bridge.last_turn['status'], 'dismissed')
+        self.feedback.assert_awaited_once_with('received')
+
+    async def test_recent_wake_dismiss_is_handled_but_requires_new_wake_afterwards(self):
+        bridge = Bridge('192.0.2.1', AsyncMock())
+        bridge.restore_native_voice = AsyncMock()
+        bridge.control_followup_until = time.monotonic() + 10
+        def final(text, identity):
+            return {'event': 'instruction', 'data': {'NewLine': json.dumps({
+                'header': {'namespace': 'SpeechRecognizer', 'name': 'RecognizeResult', 'id': identity},
+                'payload': {'is_final': True, 'results': [{'text': text}]}})}}
+        await bridge.event(final('退下', 'dismiss'))
+        await bridge.job
+        self.assertEqual(bridge.last_turn['status'], 'dismissed')
+        original_job = bridge.job
+        await bridge.event(final('继续播放', 'late-control'))
+        self.assertIs(bridge.job, original_job)
+
     def test_local_only_turns_keep_desktop_session_identity_after_restart(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
