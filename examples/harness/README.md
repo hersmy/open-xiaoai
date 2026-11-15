@@ -76,3 +76,12 @@ node --test desktop-plugin/test.mjs
 实际端到端还需核对 `/health`、客户端版本 RPC、真实 Harness 续接、TTS
 播放结束事件，以及现场说出一个问题。电脑操作是否成功取决于 Agent 的实际
 工具结果，不能从普通问答成功推断所有电脑操作都已验证。
+
+
+### 只回应“我在”，随后无声音
+
+先看健康接口中的 asr_count、listening、last_error。唤醒不代表云端 ASR 已收音。
+LX06 上仅重启 mico_aivs_lab 后，前端可能仍保留旧采集状态，event_notify 返回成功
+却不产生新的 Recognize 请求。当前实现已将 AIVS/PNS 配套恢复，并在 18 秒没收到
+识别结果时播报提示。若复发，核对 event.log 的 Recognize 计数、客户端 FD/inode
+和网络状态，不要通过反复刷固件解决。

@@ -229,6 +229,8 @@ class Bridge:
         self.wake_count = 0
         self.asr_count = 0
         self.wake_job = None
+        self.listen_timer = None
+        self.listen_timeout = 18
         self.reset_kws = False
 
     async def rpc(self, command, payload=None, timeout=35):
@@ -301,6 +303,7 @@ class Bridge:
                 self.wake_job.cancel()
                 with contextlib.suppress(asyncio.CancelledError, Exception):
                     await self.wake_job
+            await self.cancel_listen_timer()
             hello.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await hello
@@ -370,18 +373,52 @@ class Bridge:
 
     async def begin_listening(self):
         try:
+            await self.cancel_listen_timer()
             await self.cancel()
             self.listening_until = time.monotonic() + 25
             await self.rpc("run_shell", "mphelper pause >/dev/null 2>&1")
             await self.say("我在。")
             # Native ASR is opened explicitly; no spoken stock wake word needed.
-            await self.rpc("run_shell", "ubus call pnshelper event_notify '{\"src\":1,\"event\":0}'")
-            self.listening_until = time.monotonic() + 18
+            result = await self.rpc("run_shell", "ubus call pnshelper event_notify '{\"src\":1,\"event\":0}'")
+            if result.get("exit_code") != 0:
+                raise RuntimeError("原生收音接口调用失败")
+            self.listening_until = time.monotonic() + self.listen_timeout
+            self.listen_timer = asyncio.create_task(self.wait_for_recognition())
+            self.listen_timer.add_done_callback(self.observe_job)
             LOG.info("Waiting for native ASR after custom wake")
         except Exception as exc:
             self.listening_until = 0
             self.last_error = "Wake failed: " + str(exc)
             LOG.error("%s", self.last_error)
+
+    async def cancel_listen_timer(self):
+        timer, self.listen_timer = self.listen_timer, None
+        if timer and timer is not asyncio.current_task() and not timer.done():
+            timer.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await timer
+
+    async def wait_for_recognition(self):
+        await asyncio.sleep(max(0, self.listening_until - time.monotonic()))
+        if not self.listening_until:
+            return
+        self.listening_until = 0
+        self.last_error = "ASR_TIMEOUT: 唤醒后未收到最终识别文字，未向 Agent 提交命令"
+        LOG.warning(self.last_error)
+        with contextlib.suppress(Exception):
+            await self.say("没有收到语音识别结果，请再叫我一次，听到我在后说出问题。")
+
+    async def restore_native_voice(self):
+        # LX06 keeps frontend capture state across AIVS restarts. Restarting only
+        # AIVS left event_notify returning code 0 without a Recognize request.
+        # Recover its frontend too before allowing the next wake/listen cycle.
+        result = await self.rpc("run_shell",
+            "/etc/init.d/mico_aivs_lab restart >/dev/null 2>&1 && "
+            "/etc/init.d/pns restart >/dev/null 2>&1", timeout=35)
+        if result.get("exit_code") != 0:
+            raise RuntimeError("小爱语音服务或收音前端恢复失败")
+        await asyncio.sleep(3)
+        LOG.info("Native AIVS and PNS frontend recovered together")
 
     async def cancel(self):
         job, self.job = self.job, None
@@ -405,6 +442,7 @@ class Bridge:
                 self.seen.pop(next(iter(self.seen)))
         if time.monotonic() < self.listening_until:
             self.listening_until = 0
+            await self.cancel_listen_timer()
             question = re.sub(r"^大爱同学[，,。！!：:\s]*", "", text).strip()
         else:
             question = route(text)
@@ -431,12 +469,7 @@ class Bridge:
     async def dialog(self, question):
         try:
             self.last_error = None
-            # Same interruption mechanism as the upstream examples. Restore the
-            # stock TTS service before speaking; do not mutate the firmware.
-            result = await self.rpc("run_shell", "/etc/init.d/mico_aivs_lab restart >/dev/null 2>&1")
-            if result.get("exit_code") != 0:
-                raise RuntimeError("小爱语音服务未能恢复")
-            await asyncio.sleep(2)
+            await self.restore_native_voice()
             if question in ("新对话", "重新开始", "清空对话"):
                 self.runner.session_id = None
                 self.runner.state_file.unlink(missing_ok=True)

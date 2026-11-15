@@ -5,7 +5,7 @@ import shlex
 import tempfile
 import time
 import unittest
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 from bridge import Bridge, HarnessRunner, recognize, route, speech_text, tts_script, tts_completed
 
@@ -41,6 +41,42 @@ class ProtocolTests(unittest.TestCase):
 
 
 class HarnessTests(unittest.IsolatedAsyncioTestCase):
+    async def test_native_interrupt_recovers_frontend_too(self):
+        bridge = Bridge("192.0.2.1", None)
+        bridge.rpc = AsyncMock(return_value={"exit_code": 0})
+        with patch("bridge.asyncio.sleep", new=AsyncMock()):
+            await bridge.restore_native_voice()
+        command = bridge.rpc.call_args.args[1]
+        self.assertIn("mico_aivs_lab restart", command)
+        self.assertIn("&& /etc/init.d/pns restart", command)
+        bridge.rpc.return_value = {"exit_code": 1}
+        with self.assertRaises(RuntimeError):
+            await bridge.restore_native_voice()
+
+    async def test_missing_recognition_reports_failure_without_agent_call(self):
+        runner = AsyncMock()
+        bridge = Bridge("192.0.2.1", runner)
+        bridge.say = AsyncMock()
+        bridge.listening_until = time.monotonic() - .01
+        await bridge.wait_for_recognition()
+        self.assertEqual(bridge.listening_until, 0)
+        self.assertIn("ASR_TIMEOUT", bridge.last_error)
+        bridge.say.assert_awaited_once()
+        runner.run.assert_not_awaited()
+
+    async def test_received_text_cancels_timeout(self):
+        bridge = Bridge("192.0.2.1", None)
+        bridge.dialog = AsyncMock(return_value="answer")
+        bridge.listening_until = time.monotonic() + 60
+        timer = asyncio.create_task(bridge.wait_for_recognition())
+        bridge.listen_timer = timer
+        await bridge.event({"event": "instruction", "data": {"NewLine": json.dumps({
+            "header": {"id": "recognition", "namespace": "SpeechRecognizer", "name": "RecognizeResult"},
+            "payload": {"is_final": True, "results": [{"text": "你好"}]}})}})
+        await bridge.job
+        self.assertTrue(timer.cancelled())
+        bridge.dialog.assert_awaited_once_with("你好")
+
     async def test_custom_wake_routes_one_unprefixed_question(self):
         bridge = Bridge("192.0.2.1", None)
         bridge.dialog = AsyncMock(return_value="answer")
