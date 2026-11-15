@@ -12,6 +12,16 @@ def song(identity, title='有何不可', artist='许嵩', st=0):
 
 
 class OnlineMusicTests(unittest.TestCase):
+    def test_artist_request_uses_actual_performer_and_no_agent_selection(self):
+        transport = Mock(return_value={'result': {'songs': [
+            song(1, '模仿许嵩的歌', '其他歌手'), song(2, '其他歌曲', '许嵩', st=-200),
+            song(3, '如果当时', '许嵩'), song(4, '有何不可', '许嵩')]}})
+        opener = Mock(return_value=SimpleNamespace(returncode=0))
+        result = request('许嵩的歌', opener, transport)
+        self.assertEqual(result['track']['id'], 3)
+        self.assertEqual(transport.call_args.args[1]['s'], '许嵩')
+        opener.assert_called_once()
+
     def test_search_then_native_url_without_browser_shell_or_agent(self):
         transport = Mock(return_value={'code': 200, 'result': {'songs': [song(167876)]}})
         opener = Mock(return_value=SimpleNamespace(returncode=0))

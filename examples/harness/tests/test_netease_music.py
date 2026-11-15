@@ -7,6 +7,12 @@ from netease_music import library, request, parse_command, control_player
 
 
 class MusicTests(unittest.TestCase):
+    def test_conditional_word_inside_song_title_is_not_an_agent_request(self):
+        for text in ['播放许嵩的如果当时', '播放如果没有你', '播放如果这就是爱情', '播放如果还有明天']:
+            self.assertEqual(parse_command(text)['kind'], 'play', text)
+        for text in ['播放许嵩的歌如果没有就播放周杰伦的歌', '播放如果没有这首就换一首']:
+            self.assertIsNone(parse_command(text), text)
+
     def test_authorized_control_app_is_launched_via_launchservices(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

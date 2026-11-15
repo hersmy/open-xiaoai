@@ -19,6 +19,11 @@ def normalize(text):
     return ''.join(c.lower() for c in text if c.isalnum())
 
 
+def artist_query(query):
+    match = re.fullmatch(r'(.+?)的(?:歌|歌曲|音乐)', query.strip())
+    return match[1] if match else None
+
+
 def fetch(path, params, timeout=5):
     req = urllib.request.Request(BASE + path,
         data=urllib.parse.urlencode(params).encode(),
@@ -52,6 +57,9 @@ def track(raw, privilege=None):
 
 
 def matches(query, song):
+    artist = artist_query(query)
+    if artist:
+        return normalize(artist) in {normalize(a) for a in song['artists']}
     q, title = normalize(query), normalize(song['title'])
     if q == title:
         return True
@@ -80,7 +88,8 @@ def request(query, opener=subprocess.run, transport=fetch):
     try:
         # Spaces improve retrieval for artist/title requests. Matching below
         # still compares actual artist metadata, never a cover's title/alias.
-        keyword = re.sub(r'^(.+?)的(.+)$', r'\1 \2', query).strip()
+        requested_artist = artist_query(query)
+        keyword = requested_artist or re.sub(r'^(.+?)的(.+)$', r'\1 \2', query).strip()
         obj = transport('/api/cloudsearch/pc', {'s': keyword, 'type': 1, 'limit': 30, 'offset': 0}, timeout=5)
         raw_songs = obj.get('result', {}).get('songs', [])
         if not isinstance(raw_songs, list):
@@ -90,7 +99,7 @@ def request(query, opener=subprocess.run, transport=fetch):
             song = track(raw)
             if song and matches(query, song):
                 candidates[song['id']] = song
-            original = track(raw.get('originSongSimpleData')) if isinstance(raw, dict) else None
+            original = track(raw.get('originSongSimpleData')) if not requested_artist and isinstance(raw, dict) else None
             if original and matches(query, original):
                 originals[original['id']] = original
         # Covers can refer to an unavailable original. Resolve that original's
@@ -113,7 +122,7 @@ def request(query, opener=subprocess.run, transport=fetch):
     # A bare title shared by different performers needs clarification. Multiple
     # releases by the same artist may use the first matching catalog result.
     artists = {tuple(sorted(normalize(a) for a in s['artists'])) for s in candidates.values()}
-    if len(artists) > 1:
+    if not requested_artist and len(artists) > 1:
         return result(False, 'ambiguous', '网易云找到多个歌手的同名歌曲，请同时说出歌手和歌名。')
     available = [s for s in candidates.values() if s['privilege'].get('st', 0) >= 0]
     if not available:

@@ -119,7 +119,11 @@ def parse_command(text):
     match = re.fullmatch(r"(?:请帮我|请|帮我)?(?:播放|放一下|放首|放一首|我想听|我要听|听一下)(.+?)", text)
     if not match or re.search(r"新闻|天气|故事|视频|电视|播客|有声书", match[1]):
         return None
-    if re.search(r"[,，;；。]|推荐|适合|根据|分析|整理|搜索|上网|下载|创建|生成|歌单|然后|并且|同时|再帮|顺便|如果|为什么|怎么|如何|什么|哪些|并(?:帮|把|关|开|执行|告诉|播放|给)|接着|之后|之前", match[1]):
+    # A song can contain 如果 (e.g. 如果当时 / 如果没有你). Only a
+    # complete conditional action needs inference, not that word on its own.
+    if re.search(r'(?:如果|要是|假如).+(?:就|则|的话)(?:请|再|先|帮我)?(?:播放|放|听|换|暂停|继续|停止|打开|关|跳过|推荐|搜索|用|选)', match[1]):
+        return None
+    if re.search(r"[,，;；。]|推荐|适合|根据|分析|整理|搜索|上网|下载|创建|生成|歌单|然后|并且|同时|再帮|顺便|为什么|怎么|如何|什么|哪些|并(?:帮|把|关|开|执行|告诉|播放|给)|接着|之后|之前", match[1]):
         return None
     query = re.sub(r"^(?:网易云音乐|网易云|本地的|本地)[的，,\s]*", "", match[1]).strip()
     return {"kind": "play", "query": query, 'local_only': match[1].startswith(('本地', '本地的'))}

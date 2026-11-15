@@ -170,6 +170,18 @@ class HarnessTests(unittest.IsolatedAsyncioTestCase):
             await bridge.dialog('暂停播放')
         self.assertEqual(steps, ['received', 'execute', 'done'])
 
+    async def test_specific_song_with_if_word_never_calls_agent(self):
+        runner = AsyncMock()
+        bridge = Bridge('192.0.2.1', runner)
+        bridge.restore_native_voice = AsyncMock()
+        with patch('bridge.music_request', return_value={
+                'ok': True, 'status': 'opened', 'silent': True,
+                'source': 'netease_online', 'message': '已交给网易云打开'}) as execute:
+            await bridge.dialog('播放许嵩的如果当时')
+        execute.assert_called_once_with('播放许嵩的如果当时')
+        runner.run.assert_not_awaited()
+        self.assertEqual(bridge.last_turn['music_source'], 'netease_online')
+
     async def test_query_uses_fixed_answer_and_compound_request_uses_agent(self):
         runner = AsyncMock()
         runner.run.return_value = '复杂请求处理完成'
