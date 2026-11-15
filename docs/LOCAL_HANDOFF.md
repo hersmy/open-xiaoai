@@ -180,3 +180,56 @@ LaunchAgent：`~/Library/LaunchAgents/com.zhangyichi.headphone-output.plist`。
 CoreAudio 默认输出 UID 为 `C0-DA-5E-48-0E-8A:output`，用户确认音乐自动从耳机出声。
 断开恢复与人工改选保留已通过状态测试，尚未分别要求用户进行实际硬件测试。
 安装未重启 Harness 或音箱桥接。管理与卸载命令见该模块 README。
+
+## 2026-11-15 明确点歌绕过 Agent
+
+用户授权实测并优化文字到达 Mac 后的处理。`bridge.py` 先用纯函数保守分流，
+本地点歌在线程执行，不调用 Harness，不播报“我想一想”或成功提示；曲库查询和失败
+使用代码固定答复。推荐、条件、复合操作等继续走原桌面 Agent。常用控制扩展见下段。
+插件保持 0.3.0，不需要用户重新启用；仅重载 `com.zhangyichi.xiaoai-harness`。
+
+小爱原生回答的中断与 AIVS/PNS 恢复仍保留，与本地音乐打开并行。下一次唤醒会等待尚未
+结束的恢复，再打开 ASR，避免以速度换回收音失效。子任务中断会清理本轮拥有的恢复任务；
+已经交给外部应用的打开操作不会撤销，也不会因 Agent 失败而重复执行。
+
+新增 health.last_turn 逐阶段计时，含 route、agent_called、spoken、查找、打开、恢复和总耗时。
+快速操作记录在桥接自己 `.runtime/music-actions.jsonl`，不进入桌面 Agent 思考历史；
+复杂问答会话仍复用。AutoRunner 启动时读取本桥接持久指针，避免仅执行本地操作后
+健康接口错误显示旧 headless 会话。没有读写 Harness 内部存储。
+
+实测同一指令“播放许嵩的如约而至”：优化前 Mac 文字入口整轮 20410.8 ms。
+优化后两次：打开请求返回 2295.3/199.9 ms；整轮 3650.9/3491.9 ms；
+曲库查找 65.2/18.8 ms；网易云 open 调用 2208.9/179.2 ms；原生恢复 3647.3/3490.8 ms。
+两次 agent_called=false、spoken=false。另一个早期优化样本整轮 11305.0 ms，未细分其打开阶段，
+保留此异常样本，不能声称每次延迟都低于一秒。以上均不含云端 ASR，不等同实际出声计时。
+27 个 Python 测试及 5 个 Node 测试通过，包括本地无 Agent/成功无 TTS、失败只提示一次、
+复杂回退、并行打开、立即再次唤醒等待恢复、取消传播和重启后会话指针。
+
+用户确认两轮真实语音“播放许嵩的如约而至”“播放王菲的笑忘书”均成功且无额外播报。
+对应 ASR final 后的打开请求返回 1920.7/1496.8 ms，整轮 3535.8/3535.9 ms，
+均 agent_called=false、spoken=false。
+
+用户接着反馈“暂停播放”仍调用 Agent，授权常用控制代码化。新增暂停/停止/关掉音乐、
+继续/恢复播放、上一首/下一首等明确说法。暂停/继续由 Swift 辅助程序操作网易云动态
+“控制”菜单，读状态、AXPress、再核对状态；重复命令不反转，不操作其他应用。
+源码 `examples/harness/music_control.swift`，安装器 `install_music_control.py`，
+App 位于 `~/Applications/小米音箱音乐控制.app`；用户已在辅助功能添加并开启权限。
+暂停/继续四次独立实测状态为 paused/paused/playing/playing，约 421/143/267/183 ms。
+
+下一首/上一首只在项目 music 曲库中按文件名排序前后移动，首尾环绕，使用网易云原样打开
+NCM。当前曲目指针在自有 `.runtime/netease-state.json`，不是 Harness 存储；手动在网易云
+换歌后指针可能不一致，先语音点播即可同步。尚未实现音量、循环设置或播完自动续播。
+33 个 Python 测试及 5 个 Node 测试通过，包括控制成功静默、重复暂停/继续、控制失败不假报、
+曲库切歌环绕和无已知曲目时不误执行。Swift 编译成功、程序已授权；后续不要无故重编译
+改变签名造成再次授权。原先思考中的暂停任务已随本桥接停止而取消，没有重启 Harness。
+
+后台启动控制 App 必须通过 `/usr/bin/open -n -W -g -a <App> --stdout <私有临时文件>
+--stderr <私有临时文件> --args pause|resume`。已授权 App 从 LaunchAgent 直接 exec 时，
+本机 TCC 将访问归于父服务并拒绝；正常 LaunchServices 启动后访问有效。不要改 TCC 数据库。
+临时目录位于本机 .runtime，文件权限 0600，读取 JSON 结果后删除。此调用方式有回归测试。
+
+真实后台桥接文字入口五项验证全部成功：暂停、继续、点歌、下一首、上一首；命令返回约
+961/1592/2030/717/690 ms，整轮约 3.5～3.9 秒，全部 agent_called=false、spoken=false。
+切歌从《笑忘书》切到项目文件《给我一首歌的时间》，上一首回到《笑忘书》。
+随后真实 ASR 日志已记录“暂停播放”“继续播放”“请播放”，均本地接管且没有 Agent/TTS；
+其中一次暂停约 722 ms 返回且菜单状态 paused，继续约 443 ms 返回且状态 playing。

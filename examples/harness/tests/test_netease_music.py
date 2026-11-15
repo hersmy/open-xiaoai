@@ -2,11 +2,88 @@ from pathlib import Path
 import tempfile
 from types import SimpleNamespace
 import unittest
-from unittest.mock import Mock
-from netease_music import library, request
+from unittest.mock import Mock, patch
+from netease_music import library, request, parse_command, control_player
 
 
 class MusicTests(unittest.TestCase):
+    def test_authorized_control_app_is_launched_via_launchservices(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            binary = root / 'Control.app/Contents/MacOS/MusicControl'
+            binary.parent.mkdir(parents=True)
+            binary.touch()
+            def launch(args, **kwargs):
+                self.assertEqual(args[0], '/usr/bin/open')
+                self.assertIn('-W', args)
+                self.assertEqual(args[args.index('--args') + 1], 'pause')
+                output = Path(args[args.index('--stdout') + 1])
+                self.assertEqual(output.stat().st_mode & 0o777, 0o600)
+                output.write_text('{"ok":true,"status":"controlled","state":"paused"}')
+                return SimpleNamespace(returncode=0)
+            with patch('netease_music.CONTROL', binary), patch('netease_music.STATE', root / 'state.json'), \
+                 patch('netease_music.subprocess.run', side_effect=launch):
+                self.assertTrue(control_player('pause')['ok'])
+
+    def test_pause_resume_are_idempotent_commands_not_a_toggle_or_agent(self):
+        controller = Mock(return_value={'ok': True, 'status': 'controlled', 'state': 'paused'})
+        opener = Mock()
+        for phrase in ['暂停', '暂停播放', '停止播放', '关掉音乐', '请帮我暂停播放。']:
+            result = request(phrase, opener=opener, controller=controller)
+            self.assertTrue(result['silent'])
+            self.assertTrue(result['ok'])
+            controller.assert_called_with('pause')
+        request('继续播放', opener=opener, controller=controller)
+        controller.assert_called_with('resume')
+        opener.assert_not_called()
+        self.assertIsNone(parse_command('暂停播放然后关灯'))
+
+    def test_failed_control_reports_failure_without_fake_success(self):
+        controller = Mock(return_value={'ok': False, 'status': 'permission_required', 'message': '请授权'})
+        result = request('暂停播放', controller=controller)
+        self.assertFalse(result['silent'])
+        self.assertFalse(result['ok'])
+        self.assertEqual(result['message'], '请授权')
+
+    def test_skip_uses_only_project_library_and_wraps(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / 'A - One.ncm').write_bytes(b'audio')
+            (root / 'B - Two.mp3').write_bytes(b'audio')
+            state = root / 'state.json'
+            opener = Mock(return_value=SimpleNamespace(returncode=0))
+            first = request('播放One', root, opener, state_path=state)
+            self.assertEqual(first['track']['title'], 'One')
+            following = request('下一首', root, opener, state_path=state)
+            self.assertEqual(following['track']['title'], 'Two')
+            wrapped = request('下一首', root, opener, state_path=state)
+            self.assertEqual(wrapped['track']['title'], 'One')
+            previous = request('上一首', root, opener, state_path=state)
+            self.assertEqual(previous['track']['title'], 'Two')
+
+    def test_skip_does_not_guess_when_last_track_is_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            opener = Mock()
+            result = request('下一首', root, opener, state_path=root / 'missing.json')
+            self.assertFalse(result['ok'])
+            opener.assert_not_called()
+
+    def test_compound_and_inferential_requests_do_not_execute(self):
+        opener = Mock()
+        for text in ['播放适合写论文的歌', '播放如约而至，然后关灯', '播放如约而至并关灯',
+                     '播放推荐歌单', '播放这首歌之前分析一下歌词']:
+            self.assertIsNone(parse_command(text), text)
+            self.assertFalse(request(text, opener=opener)['handled'])
+        opener.assert_not_called()
+
+    def test_punctuation_and_count_have_fixed_meaning(self):
+        self.assertEqual(parse_command('请帮我播放许嵩的如约而至。')['kind'], 'play')
+        self.assertEqual(parse_command('本地曲库有多少首歌？')['kind'], 'count')
+        with tempfile.TemporaryDirectory() as tmp:
+            result = request('本地曲库有多少首歌？', Path(tmp), Mock())
+            self.assertEqual(result['message'], '本地曲库共有0首歌。')
+
     def test_ncm_is_passed_unchanged_without_shell(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -18,6 +18,7 @@ import time
 import uuid
 
 from aiohttp import ClientSession, ClientTimeout, WSMsgType, web
+from netease_music import parse_command as music_command, request as music_request
 
 ROOT = Path(__file__).resolve().parent
 DEFAULT_DSH = "/Applications/DeepSeek Harness.app/Contents/Resources/runtime/cli/bin/dsh"
@@ -153,7 +154,7 @@ class DesktopRunner:
     def __init__(self, state_dir):
         self.state_dir = Path(state_dir)
         self.state_file = self.state_dir / "desktop-session.json"
-        self.session_id = None
+        self.session_id = json.loads(self.state_file.read_text()).get('session_id') if self.state_file.exists() else None
         self.last_tools = []
 
     async def run(self, text):
@@ -180,7 +181,7 @@ class AutoRunner:
         self.headless = HarnessRunner(executable, state_dir, timeout)
         self.desktop = DesktopRunner(state_dir)
         self.state_dir = Path(state_dir)
-        self.current = self.headless
+        self.current = self.desktop if (self.state_dir / 'desktop.json').exists() else self.headless
 
     @property
     def session_id(self):
@@ -210,7 +211,7 @@ class AutoRunner:
 
 
 class Bridge:
-    def __init__(self, speaker_ip, runner, spotter=None):
+    def __init__(self, speaker_ip, runner, spotter=None, state_dir=None):
         self.speaker_ip = speaker_ip
         self.runner = runner
         self.ws = None
@@ -233,6 +234,10 @@ class Bridge:
         self.listen_timer = None
         self.listen_timeout = 18
         self.reset_kws = False
+        self.state_dir = Path(state_dir) if state_dir is not None else None
+        self.local_completed = 0
+        self.last_turn = None
+        self.native_recovery = None
 
     async def rpc(self, command, payload=None, timeout=35):
         ws = self.ws
@@ -375,6 +380,10 @@ class Bridge:
     async def begin_listening(self):
         try:
             await self.cancel_listen_timer()
+            # A fast music open can finish before PNS becomes ready. Preserve
+            # that recovery when the user immediately wakes us again.
+            if self.native_recovery is not None:
+                await asyncio.shield(self.native_recovery)
             await self.cancel()
             self.listening_until = time.monotonic() + 25
             await self.rpc("run_shell", "mphelper pause >/dev/null 2>&1")
@@ -449,7 +458,7 @@ class Bridge:
             question = route(text)
         if question is None:
             return
-        LOG.info("Routed final ASR event to Harness")
+        LOG.info("Routed final ASR event to command dispatcher")
         # The stock wake detector can also open ASR while the custom greeting is
         # playing. Once a final question arrives, prevent the greeting task from
         # reopening a second listening window or reporting an expected cut-off.
@@ -468,9 +477,41 @@ class Bridge:
             task.exception()
 
     async def dialog(self, question):
+        started = time.monotonic()
+        metrics = {"id": uuid.uuid4().hex[:12], "route": "agent", "agent_called": False}
+        self.last_turn = metrics
+        owned = []
+        local_result = None
         try:
             self.last_error = None
-            await self.restore_native_voice()
+            if music_command(question) is not None:
+                metrics['route'] = 'local_music'
+                # Stop stock replies and restore capture state while the Mac
+                # opens the file; playback need not wait for frontend recovery.
+                recovery = asyncio.create_task(self.timed(metrics, 'native_recovery_ms', self.restore_native_voice()))
+                self.native_recovery = recovery
+                playback = asyncio.create_task(self.timed(metrics, 'music_command_ms',
+                    asyncio.to_thread(music_request, question)))
+                owned.extend([recovery, playback])
+                result = await playback
+                local_result = result
+                metrics.update({'music_' + key: value for key, value in result.get('timing', {}).items()})
+                metrics['command_result_after_ms'] = round((time.monotonic() - started) * 1000, 1)
+                metrics['status'] = result.get('status', 'answered' if result.get('ok') else 'failed')
+                metrics['ok'] = bool(result.get('ok'))
+                LOG.info('Local music result: %s', json.dumps(metrics))
+                await recovery
+                # A successful open is the feedback. Queries and failures need
+                # a fixed answer, never an Agent-generated confirmation.
+                metrics['spoken'] = not result.get('silent', result.get('status') == 'opened')
+                if metrics['spoken']:
+                    await self.timed(metrics, 'answer_tts_ms', self.say(result['message']))
+                self.completed += 1
+                self.local_completed += 1
+                if not result.get('ok'):
+                    self.last_error = result['message']
+                return result['message']
+            await self.timed(metrics, 'native_recovery_ms', self.restore_native_voice())
             if question in ("新对话", "重新开始", "清空对话"):
                 self.runner.session_id = None
                 self.runner.state_file.unlink(missing_ok=True)
@@ -482,22 +523,58 @@ class Bridge:
             if not question:
                 await self.say("我在。请说小爱同学，问助手，加上你的问题。")
                 return "等待问题"
-            await self.say("我想一想。")
-            answer = await self.run_with_feedback(question)
-            await self.say(answer)
+            await self.timed(metrics, 'thinking_tts_ms', self.say("我想一想。"))
+            metrics['agent_called'] = True
+            answer = await self.timed(metrics, 'agent_ms', self.run_with_feedback(question))
+            await self.timed(metrics, 'answer_tts_ms', self.say(answer))
             self.completed += 1
             self.last_error = None
             LOG.info("Harness reply played; completed=%d", self.completed)
             return answer
         except asyncio.CancelledError:
+            metrics['status'] = 'cancelled'
             LOG.info("Assistant turn interrupted")
             raise
         except Exception as exc:
+            metrics['status'] = 'error'
             self.last_error = type(exc).__name__ + ": " + str(exc)
             LOG.error("Assistant turn failed: %s", self.last_error)
             with contextlib.suppress(Exception):
                 await self.say(self.failure_message(exc))
             raise
+        finally:
+            for task in owned:
+                if not task.done():
+                    task.cancel()
+            if owned:
+                await asyncio.gather(*owned, return_exceptions=True)
+                if self.native_recovery in owned:
+                    self.native_recovery = None
+            metrics['total_ms'] = round((time.monotonic() - started) * 1000, 1)
+            if local_result is not None:
+                self.record_music_action(question, local_result, metrics)
+            LOG.info('Turn timing: %s', json.dumps(metrics))
+
+    @staticmethod
+    async def timed(metrics, name, awaitable):
+        started = time.monotonic()
+        try:
+            return await awaitable
+        finally:
+            metrics[name] = round((time.monotonic() - started) * 1000, 1)
+
+    def record_music_action(self, question, result, metrics):
+        if self.state_dir is None:
+            return
+        entry = {"time": time.time(), "command": question, "result": result, "timing": dict(metrics)}
+        try:
+            self.state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+            path = self.state_dir / 'music-actions.jsonl'
+            fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+            with os.fdopen(fd, 'a') as stream:
+                stream.write(json.dumps(entry, ensure_ascii=False) + '\n')
+        except OSError as exc:
+            LOG.warning('Local action journal unavailable: %s', exc)
 
     @staticmethod
     def failure_message(exc):
@@ -538,6 +615,7 @@ class Bridge:
             "backend": getattr(self.runner, "backend", "headless"),
             "desktop_plugin_ready": (self.runner.state_dir / "desktop.json").exists(),
             "wake_word": self.spotter.phrase if self.spotter else None,
+            "local_completed_turns": self.local_completed, "last_turn": self.last_turn,
             "wake_count": self.wake_count, "asr_count": self.asr_count,
             "listening": time.monotonic() < self.listening_until,
             "audio_bytes": self.audio_bytes, "audio_peak": self.audio_peak,
@@ -560,7 +638,8 @@ class Bridge:
             raise web.HTTPConflict(text="Turn interrupted")
         except Exception:
             raise web.HTTPBadGateway(text="Agent turn failed; inspect local service log")
-        return web.json_response({"answer": answer, "session_id": self.runner.session_id})
+        return web.json_response({"answer": answer, "session_id": self.runner.session_id,
+                                  "execution": self.last_turn})
 
 
 async def serve(args):
@@ -571,7 +650,7 @@ async def serve(args):
         from wakeword import WakeWord
         spotter = await asyncio.to_thread(WakeWord, Path(args.state) / "models")
         LOG.info("Custom keyword model loaded: %s", spotter.phrase)
-    bridge = Bridge(args.speaker_ip, runner, spotter)
+    bridge = Bridge(args.speaker_ip, runner, spotter, state_dir=args.state)
     public = web.Application(client_max_size=16384)
     public.router.add_get("/", bridge.websocket)
     local = web.Application(client_max_size=16384)

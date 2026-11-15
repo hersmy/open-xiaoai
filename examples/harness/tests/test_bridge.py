@@ -7,7 +7,7 @@ import time
 import unittest
 from unittest.mock import AsyncMock, patch
 
-from bridge import Bridge, HarnessRunner, recognize, route, speech_text, tts_script, tts_completed
+from bridge import Bridge, HarnessRunner, AutoRunner, recognize, route, speech_text, tts_script, tts_completed
 
 
 class ProtocolTests(unittest.TestCase):
@@ -41,6 +41,134 @@ class ProtocolTests(unittest.TestCase):
 
 
 class HarnessTests(unittest.IsolatedAsyncioTestCase):
+    def test_local_only_turns_keep_desktop_session_identity_after_restart(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / 'desktop-session.json').write_text(json.dumps({'session_id': 'voice-session'}))
+            (root / 'desktop.json').write_text('{}')
+            runner = AutoRunner('/unused', root, 180)
+            self.assertEqual(runner.backend, 'desktop')
+            self.assertEqual(runner.session_id, 'voice-session')
+
+    async def test_local_play_opens_while_recovering_without_agent_or_tts(self):
+        runner = AsyncMock()
+        bridge = Bridge('192.0.2.1', runner)
+        bridge.say = AsyncMock()
+        recovering = asyncio.Event()
+        release = asyncio.Event()
+        async def recover():
+            recovering.set()
+            await release.wait()
+        bridge.restore_native_voice = recover
+        result = {'handled': True, 'ok': True, 'status': 'opened', 'message': '已交给网易云打开'}
+        with patch('bridge.music_request', return_value=result):
+            task = asyncio.create_task(bridge.dialog('播放如约而至'))
+            await recovering.wait()
+            for _ in range(100):
+                if 'command_result_after_ms' in bridge.last_turn:
+                    break
+                await asyncio.sleep(.001)
+            self.assertIn('command_result_after_ms', bridge.last_turn)
+            self.assertFalse(task.done())
+            bridge.say.assert_not_awaited()
+            runner.run.assert_not_awaited()
+            release.set()
+            self.assertEqual(await task, result['message'])
+        self.assertEqual(bridge.local_completed, 1)
+        self.assertEqual(bridge.last_turn['route'], 'local_music')
+        self.assertFalse(bridge.last_turn['agent_called'])
+        self.assertFalse(bridge.last_turn['spoken'])
+
+    async def test_local_failure_is_spoken_once_without_agent_retry(self):
+        runner = AsyncMock()
+        bridge = Bridge('192.0.2.1', runner)
+        bridge.say = AsyncMock()
+        bridge.restore_native_voice = AsyncMock()
+        result = {'handled': True, 'ok': False, 'message': '本地没有这首歌'}
+        with patch('bridge.music_request', return_value=result) as execute:
+            await bridge.dialog('播放不存在的歌曲')
+        execute.assert_called_once()
+        bridge.say.assert_awaited_once_with(result['message'])
+        runner.run.assert_not_awaited()
+        self.assertEqual(bridge.last_error, result['message'])
+
+    async def test_pause_is_silent_and_does_not_call_agent(self):
+        runner = AsyncMock()
+        bridge = Bridge('192.0.2.1', runner)
+        bridge.say = AsyncMock()
+        bridge.restore_native_voice = AsyncMock()
+        result = {'handled': True, 'ok': True, 'status': 'controlled', 'silent': True, 'message': '已暂停。'}
+        with patch('bridge.music_request', return_value=result) as execute:
+            await bridge.dialog('暂停播放')
+        execute.assert_called_once_with('暂停播放')
+        runner.run.assert_not_awaited()
+        bridge.say.assert_not_awaited()
+        self.assertFalse(bridge.last_turn['spoken'])
+
+    async def test_query_uses_fixed_answer_and_compound_request_uses_agent(self):
+        runner = AsyncMock()
+        runner.run.return_value = '复杂请求处理完成'
+        bridge = Bridge('192.0.2.1', runner)
+        bridge.say = AsyncMock()
+        bridge.restore_native_voice = AsyncMock()
+        with patch('bridge.music_request', return_value={'ok': True, 'message': '共有11首歌'}):
+            await bridge.dialog('本地曲库有多少首歌')
+        bridge.say.assert_awaited_once_with('共有11首歌')
+        runner.run.assert_not_awaited()
+        bridge.say.reset_mock()
+        with patch('bridge.music_request') as execute:
+            await bridge.dialog('播放适合写论文的音乐')
+        execute.assert_not_called()
+        runner.run.assert_awaited_once_with('播放适合写论文的音乐')
+        self.assertTrue(bridge.last_turn['agent_called'])
+
+    async def test_cancelling_local_turn_also_cancels_recovery(self):
+        bridge = Bridge('192.0.2.1', AsyncMock())
+        cancelled = asyncio.Event()
+        started = asyncio.Event()
+        async def recover():
+            started.set()
+            try:
+                await asyncio.sleep(60)
+            finally:
+                cancelled.set()
+        bridge.restore_native_voice = recover
+        with patch('bridge.music_request', return_value={'ok': True, 'status': 'opened', 'message': '已打开'}):
+            task = asyncio.create_task(bridge.dialog('播放如约而至'))
+            await started.wait()
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+        self.assertTrue(cancelled.is_set())
+        self.assertEqual(bridge.last_turn['status'], 'cancelled')
+
+    async def test_immediate_rewake_waits_for_native_recovery_before_opening_asr(self):
+        bridge = Bridge('192.0.2.1', AsyncMock())
+        bridge.say = AsyncMock()
+        bridge.rpc = AsyncMock(return_value={'exit_code': 0})
+        release = asyncio.Event()
+        async def recover():
+            await release.wait()
+        bridge.restore_native_voice = recover
+        result = {'ok': True, 'status': 'opened', 'message': '已打开'}
+        with patch('bridge.music_request', return_value=result):
+            original_job = asyncio.create_task(bridge.dialog('播放如约而至'))
+            bridge.job = original_job
+            for _ in range(100):
+                if bridge.last_turn and 'command_result_after_ms' in bridge.last_turn:
+                    break
+                await asyncio.sleep(.001)
+            wake = asyncio.create_task(bridge.begin_listening())
+            await asyncio.sleep(.01)
+            bridge.rpc.assert_not_awaited()
+            self.assertFalse(bridge.native_recovery.cancelled())
+            release.set()
+            await wake
+            await bridge.cancel_listen_timer()
+            await asyncio.gather(original_job, return_exceptions=True)
+        bridge.say.assert_awaited_once_with('我在。')
+        self.assertTrue(any('pnshelper' in call.args[1] for call in bridge.rpc.call_args_list))
+
     async def test_slow_task_feedback_does_not_restart_agent(self):
         async def slow_answer(text):
             await asyncio.sleep(.06)
