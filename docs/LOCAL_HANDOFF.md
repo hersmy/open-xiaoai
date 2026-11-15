@@ -162,3 +162,21 @@ session ID 沿用原语音会话。通过桥接 `--ask '本地曲库有多少首
 尝试向 `fork` 推送 `feat/harness-voice-bridge`，服务端返回
 `Permission to hersmy/open-xiaoai.git denied to hersmy`（HTTP 403）；远端查询没有该分支。
 代码已本地提交，尚未同步；后续取得可写凭据后再推送并核对 SHA。不要把音乐文件提交进去。
+
+## 2026-11-15 华为耳机自动切换 Mac 输出
+
+用户确认安装独立服务 `com.zhangyichi.headphone-output`，登录后自动运行。
+源码/管理入口：`examples/macos-audio-switch/`；程序和状态在内置盘
+`~/Library/Application Support/XiaoaiAudioSwitch/`，不依赖外置盘或 Harness 运行。
+LaunchAgent：`~/Library/LaunchAgents/com.zhangyichi.headphone-output.plist`。
+
+目标精确名称 `HUAWEI FreeBuds Pro 5`。CoreAudio 监听连接并切换默认媒体输出，
+断开时恢复原来仍可用的设备。连接期间手动改选则让出控制，直到下次重连。
+只改变媒体输出，不改输入、音量或播放状态。使用系统默认输出的应用随之切换；
+应用自己固定设备时需另行在应用内选择系统默认。
+
+验证：Swift 编译无警告，17 项状态检查通过；LaunchAgent plist 验证通过，进程常驻。
+真实日志记录从 DELL S2725DSM 切到 HUAWEI FreeBuds Pro 5，`phase=active`；
+CoreAudio 默认输出 UID 为 `C0-DA-5E-48-0E-8A:output`，用户确认音乐自动从耳机出声。
+断开恢复与人工改选保留已通过状态测试，尚未分别要求用户进行实际硬件测试。
+安装未重启 Harness 或音箱桥接。管理与卸载命令见该模块 README。

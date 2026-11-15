@@ -1,0 +1,56 @@
+# 华为耳机连接后自动切换输出
+
+独立 macOS 用户服务，目标为 `HUAWEI FreeBuds Pro 5`。通过系统 CoreAudio 接口监听
+可用输出设备与默认媒体输出，连接后选择耳机；断开后恢复此前仍可用的输出。
+若连接期间手动选择了其他输出，服务保留选择，直到耳机下次重连。
+
+精确匹配名称；恢复设备按 UID 保存。重名目标不自动选择。失败最多尝试五次，
+恢复设备不可用时保留 macOS 的回退选择。监听事件去抖 400 ms；每 10 秒补查一次
+以覆盖蓝牙就绪延迟和唤醒。无需网络、第三方音频软件或管理员权限。
+
+只修改默认媒体输出，不修改麦克风、音量或播放器播放状态。正常使用系统默认输出的
+网易云等应用随之切换；应用若固定指定了某个设备，需要在应用内改为系统默认输出。
+播放器如果因断连或佩戴检测而暂停，本服务不会代替用户恢复播放。
+
+## 安装与管理
+
+需 macOS 与 Xcode Command Line Tools（本机已安装）。在此目录运行：
+
+```sh
+python3 manage.py install
+python3 manage.py status
+python3 manage.py stop
+python3 manage.py start
+python3 manage.py uninstall
+```
+
+安装默认目标名称可用 `install --target '其他耳机名称'` 更改。
+`stop` 停止本次登录的服务；永久停用请 `uninstall`，会保留状态和日志供检查。
+
+安装位置在内置盘，运行不依赖外置盘或 Harness：
+
+- 程序/状态/日志：`~/Library/Application Support/XiaoaiAudioSwitch/`
+- 登录启动：`~/Library/LaunchAgents/com.zhangyichi.headphone-output.plist`
+- 服务：`com.zhangyichi.headphone-output`
+
+状态日志 `phase=absent` 表示耳机未就绪，`active` 表示耳机已成为输出；`yielded`
+表示随后改选了其他设备，服务不再接管。`failed` 表示达到重试上限，需检查错误后重连。
+进程启动后若耳机已连接，也会选择耳机，优先用持久状态恢复之前的设备。
+音量沿用该设备系统设置；服务不会取消静音或提高音量。
+
+## 验证
+
+```sh
+.runtime/headphone-output --self-test
+.runtime/headphone-output --list
+```
+
+状态测试覆盖连接、系统抢先切换、人工改选、重连、断开恢复、之前设备消失、
+重试上限和重启恢复。真实切换还需：保持音乐播放，重连耳机确认输出；连接期间手动
+选择其他输出，确认不会被抢回；重连再断开，确认恢复此前的可用设备。
+
+源码、安装器、文档提交 Git；编译产物 `.runtime/`、安装目录、设备状态和日志不提交。
+
+2026-11-15 实机：安装成功、进程常驻、17 项规则检查通过。服务日志记录
+`DELL S2725DSM → HUAWEI FreeBuds Pro 5` 并进入 `active`；系统默认输出核对为耳机，
+用户确认重连后音乐自动从耳机出声。断开恢复与手动改选的硬件验证尚未单独进行。

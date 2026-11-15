@@ -125,6 +125,7 @@ cd /Users/zhangyichi/codex/open-xiaoai-lx06/examples/harness
 歌词和封面是可选附件，不是点歌必需文件；所有音频和附件均不提交 Git。
 
 播放走 Mac 当前声音输出：电脑扬声器、耳机或用户自行连接的蓝牙音箱。
+华为耳机连接时自动切换 Mac 输出的独立服务，见 [macOS 音频切换](../macos-audio-switch/README.md)。
 无需重刷音箱。此实现尚无播放队列、自动下一首或暂停控制；不让 LX06 直接解码 NCM。
 系统打开请求成功仅记为 `status=opened`，不能据此推断每次已经出声。
 原生小爱 ASR/TTS 和 Harness 推理仍沿用原有配置，并非整套离线语音系统。
