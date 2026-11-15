@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { authorized, finalText, start, TURN_TIMEOUT_MS } from './index.js';
+import { authorized, finalText, start, TURN_TIMEOUT_MS, musicContext } from './index.js';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -11,6 +11,13 @@ test('requires exact bearer token; rejects missing or wrong length', () => {
 });
 test('desktop tool turns have a thirty-minute deadline', () => {
   assert.equal(TURN_TIMEOUT_MS, 1800000);
+});
+test('music handoff records actual launch status without claiming audible playback', async () => {
+  const context = await musicContext('播放歌曲', undefined, async () => ({ stdout:
+    JSON.stringify({ handled: true, ok: true, status: 'opened' }) }));
+  assert.match(context, /opened/);
+  assert.match(context, /不要再次打开/);
+  assert.equal(await musicContext('你好', undefined, async () => ({ stdout: '{"handled":false}' })), '');
 });
 test('never speaks reasoning or tool-call intermediate message', () => {
   const event = content => ({ type: 'assistant/message', data: { message: { content } } });

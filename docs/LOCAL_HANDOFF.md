@@ -11,7 +11,7 @@
 | 用户 Harness 工作区 | `/Volumes/PHILIPS/小米音箱`，名称“小米音箱” |
 | 外置盘旧副本 | `/Volumes/PHILIPS/小米音箱/open-xiaoai-lx06`，仅早期刷机/上游副本 |
 | Git 分支 | `feat/harness-voice-bridge` |
-| 上游 | `idootop/open-xiaoai`，已归档；尚无用户指定的可写远端 |
+| 上游 | `idootop/open-xiaoai`，已归档；用户提供的分叉为 `hersmy/open-xiaoai`，推送状态见交付记录 |
 | 设备 | 实际核验一台 LX06，固件 1.94.13，system0 + boot0，bootdelay 15 |
 | 网络快照 | 手机热点；音箱 `192.168.228.16`，Mac `192.168.228.248`，MAC `50:88:11:2d:38:c2` |
 
@@ -93,7 +93,7 @@ Harness 失败/超时；插件测试覆盖认证、final 过滤及 mock Host 会
 生成回复并由音箱播报，健康接口 `backend=desktop`，用户确认消息和回复可见。
 真实语音 headless 闭环此前也已由用户确认。
 
-本地交付必须白名单 Git 提交；上游归档且 CLI 未登录，推送失败时保留本地提交，明确报告
+本地交付必须白名单 Git 提交；优先向用户分叉推送功能分支，推送失败时保留本地提交，明确报告
 未同步。不要用论文项目远端或 Obsidian 远端存放本项目代码。
 
 
@@ -138,3 +138,27 @@ turn_timeout_ms 为准；未加载前不能宣称三分钟限制已在桌面消�
 部署验证：用户单独重新启用插件后，health 返回 version=0.2.0、
 turn_timeout_ms=1800000，专用桌面 Session ID 保持不变。真实 Agent 简短测试
 返回“语音助手更新成功。”，音箱 TTS 完成。超过三分钟的实际工具任务尚待后续使用观察。
+
+## 2026-11-15 Mac 网易云本地点歌
+
+用户接受 Mac 直接播放，后续可自行用蓝牙将系统输出切到小爱音箱。
+`/Volumes/PHILIPS/小米音箱/music` 已复制 11 音频、11 歌词、10 封面，SHA-256 校验一致；
+源目录 `/Users/zhangyichi/Music/网易云音乐` 保留。9 NCM 与 2 MP3 均不转换，不进入 Git。
+
+新增 `examples/harness/netease_music.py`，按文件名匹配歌手/歌名，使用无 shell 的
+`/usr/bin/open -a /Applications/NeteaseMusic.app <文件路径>` 交给网易云。
+插件 0.3.0 在提交语音给 Agent 前执行匹配，把结果附入同一桌面会话；Agent 只复述结果，
+不再次调用播放器。普通非音乐请求继续原流程。仅支持单首打开、歌手随机、曲库随机和查询；
+暂停、自动下一首和播放器状态反馈尚未实现。
+
+验证：19 个 Python 测试、5 个 Node 测试通过，覆盖路径限制、NCM 原格式交给应用、
+错误如实反馈及插件结果注入。实际打开项目目录中《如约而至》后，用户确认电脑能听到音乐。
+用户单独重新启用插件；health 实查 version=0.3.0、workspace 为目标外置盘目录，
+session ID 沿用原语音会话。通过桥接 `--ask '本地曲库有多少首歌'` 的真实桌面 Agent
+调用返回“本地曲库共有11首歌。”并完成音箱 TTS。完整新增语音点歌的现场结果仍需
+与文件打开和文字入口验证分别记录。
+
+源码同步：新增远端 `fork=https://github.com/hersmy/open-xiaoai.git`，保留归档上游 origin。
+尝试向 `fork` 推送 `feat/harness-voice-bridge`，服务端返回
+`Permission to hersmy/open-xiaoai.git denied to hersmy`（HTTP 403）；远端查询没有该分支。
+代码已本地提交，尚未同步；后续取得可写凭据后再推送并核对 SHA。不要把音乐文件提交进去。

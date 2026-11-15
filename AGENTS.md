@@ -6,6 +6,7 @@
 - 已刷 LX06 1.94.13，boot0/system0；基础通信已验证。日常开发通过 SSH/Wi-Fi，不重新刷机。
 - 用户确定自定义唤醒词“大爱同学”；原生“小爱同学”继续保留。
 - 用户指定复用本地 DeepSeek Harness 的 Agent/模型配置，不另接小智云，不复制或输出 Token。
+- 本地曲库在 `/Volumes/PHILIPS/小米音箱/music`；NCM 保持原格式，交给 Mac 网易云播放，走当前系统音频输出。点歌使用 `examples/harness/.venv/bin/python examples/harness/netease_music.py --command '播放歌名'`，不要重复打开或改走在线搜索。
 - 桌面实时对话目标为用户现有“小米音箱”工作区（`/Volumes/PHILIPS/小米音箱`）中的语音专用会话。
   桥接 headless 会话不等于桌面可见会话；必须实际确认插件就绪和会话归属后才能宣称已接通。
 - 音箱端客户端在 `/data/open-xiaoai`，Mac LaunchAgent 是 `com.zhangyichi.xiaoai-harness`。
