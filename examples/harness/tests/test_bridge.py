@@ -276,9 +276,51 @@ class HarnessTests(unittest.IsolatedAsyncioTestCase):
         command = bridge.rpc.call_args.args[1]
         self.assertIn("mico_aivs_lab restart", command)
         self.assertIn("&& /etc/init.d/pns restart", command)
+        self.assertLess(command.index('mphelper pause'), command.index('mico_aivs_lab restart'))
+        self.assertGreater(command.rindex('mphelper pause'), command.index('/etc/init.d/pns restart'))
         bridge.rpc.return_value = {"exit_code": 1}
         with self.assertRaises(RuntimeError):
             await bridge.restore_native_voice()
+
+    async def test_late_native_music_is_paused_only_for_owned_custom_asr_dialog(self):
+        bridge = Bridge('192.0.2.1', None)
+        bridge.rpc = AsyncMock(return_value={'exit_code': 0})
+        def event(namespace, name, identity):
+            return {'event': 'instruction', 'data': {'NewLine': json.dumps({
+                'header': {'namespace': namespace, 'name': name, 'dialog_id': identity}, 'payload': {}})}}
+        # A partial ASR already establishes ownership before the cloud intent.
+        bridge.listening_until = time.monotonic() + 10
+        await bridge.event(event('SpeechRecognizer', 'RecognizeResult', 'custom-dialog'))
+        bridge.listening_until = 0
+        await bridge.event(event('AudioPlayer', 'Play', 'stock-dialog'))
+        bridge.rpc.assert_not_awaited()
+        await bridge.event(event('AudioPlayer', 'Play', 'custom-dialog'))
+        await bridge.native_pause_job
+        self.assertEqual(bridge.native_music_suppressed, 1)
+        self.assertIn('mphelper pause', bridge.rpc.call_args.args[1])
+        bridge.rpc.reset_mock()
+        bridge.custom_dialogs['custom-dialog'] = time.monotonic() - 1
+        await bridge.event(event('AudioPlayer', 'Play', 'custom-dialog'))
+        bridge.rpc.assert_not_awaited()
+
+    async def test_native_music_guard_does_not_block_websocket_rpc_reader(self):
+        bridge = Bridge('192.0.2.1', None)
+        bridge.custom_dialogs['custom-dialog'] = time.monotonic() + 10
+        release = asyncio.Event()
+        async def rpc(*args, **kwargs):
+            await release.wait()
+            return {'exit_code': 0}
+        bridge.rpc = rpc
+        event = {'event': 'instruction', 'data': {'NewLine': json.dumps({
+            'header': {'namespace': 'AudioPlayer', 'name': 'Play', 'dialog_id': 'custom-dialog'}})}}
+        await asyncio.wait_for(bridge.event(event), timeout=.1)
+        await asyncio.sleep(0)
+        self.assertFalse(bridge.native_pause_job.done())
+        # A second Play arriving during the first RPC still needs a final pause.
+        await bridge.event(event)
+        release.set()
+        await bridge.native_pause_job
+        self.assertEqual(bridge.native_music_suppressed, 2)
 
     async def test_missing_recognition_reports_failure_without_agent_call(self):
         runner = AsyncMock()

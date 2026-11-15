@@ -253,6 +253,10 @@ class Bridge:
         self.rearm_needed = False
         self.rearm_attempts = 0
         self.rearm_job = None
+        self.custom_dialogs = {}
+        self.native_pause_job = None
+        self.native_pause_requested = False
+        self.native_music_suppressed = 0
 
     def clear_audio(self):
         while not self.audio_queue.empty():
@@ -357,6 +361,12 @@ class Bridge:
                     await self.wake_job
             await self.cancel_listen_timer()
             await self.cancel_rearm()
+            if self.native_pause_job:
+                self.native_pause_job.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await self.native_pause_job
+            self.custom_dialogs.clear()
+            self.native_pause_requested = False
             self.rearm_needed = False
             self.rearm_attempts = 0
             hello.cancel()
@@ -521,12 +531,58 @@ class Bridge:
         # AIVS left event_notify returning code 0 without a Recognize request.
         # Recover its frontend too before allowing the next wake/listen cycle.
         result = await self.rpc("run_shell",
+            # Restarting AIVS does NOT stop a track already handed to the
+            # separate mediaplayer. Cover already-started and queued playback
+            # on both sides of the voice-service restart.
+            "mphelper pause >/dev/null 2>&1 && "
             "/etc/init.d/mico_aivs_lab restart >/dev/null 2>&1 && "
-            "/etc/init.d/pns restart >/dev/null 2>&1", timeout=35)
+            "/etc/init.d/pns restart >/dev/null 2>&1 && "
+            "mphelper pause >/dev/null 2>&1", timeout=35)
         if result.get("exit_code") != 0:
             raise RuntimeError("小爱语音服务或收音前端恢复失败")
         await asyncio.sleep(3)
         LOG.info("Native AIVS and PNS frontend recovered together")
+
+    def guard_native_playback(self, event):
+        """Own only ASR dialog IDs from custom listening, never stock requests."""
+        if event.get('event') != 'instruction':
+            return
+        try:
+            obj = json.loads(event.get('data', {}).get('NewLine', ''))
+            header = obj.get('header', {})
+            identity = header.get('dialog_id')
+            if not isinstance(identity, str) or not identity:
+                return
+            now = time.monotonic()
+            self.custom_dialogs = {key: expiry for key, expiry in self.custom_dialogs.items() if expiry > now}
+            if (header.get('namespace'), header.get('name')) == ('SpeechRecognizer', 'RecognizeResult'):
+                if now < self.listening_until:
+                    self.custom_dialogs[identity] = now + 30
+                    if len(self.custom_dialogs) > 32:
+                        self.custom_dialogs.pop(next(iter(self.custom_dialogs)))
+            elif ((header.get('namespace'), header.get('name')) == ('AudioPlayer', 'Play')
+                  and identity in self.custom_dialogs):
+                self.native_pause_requested = True
+                if self.native_pause_job is None or self.native_pause_job.done():
+                    self.native_pause_job = asyncio.create_task(self.pause_competing_native_music())
+                    self.native_pause_job.add_done_callback(self.observe_job)
+        except (ValueError, TypeError, AttributeError):
+            pass
+
+    async def pause_competing_native_music(self):
+        # Never await RPC in the WebSocket event reader: its next messages carry
+        # that RPC's response. Coalesce bursts without losing a late Play event.
+        try:
+            while self.native_pause_requested:
+                self.native_pause_requested = False
+                result = await self.rpc('run_shell', 'mphelper pause >/dev/null 2>&1', timeout=8)
+                if result.get('exit_code') != 0:
+                    raise RuntimeError('原生竞争播放暂停失败')
+                self.native_music_suppressed += 1
+                LOG.info('Paused competing native music for an owned custom ASR dialog')
+        except Exception as exc:
+            self.last_error = 'Native playback guard: ' + str(exc)
+            LOG.error('%s', self.last_error)
 
     async def cancel(self):
         self.pending_question = None
@@ -537,6 +593,7 @@ class Bridge:
                 await job
 
     async def event(self, event):
+        self.guard_native_playback(event)
         result = recognize(event)
         if not result:
             # Partial speech extends the timeout but never executes a command.
@@ -790,6 +847,7 @@ class Bridge:
             "local_completed_turns": self.local_completed, "last_turn": self.last_turn,
             "last_recognition": self.last_recognition, "queued_control": self.pending_question is not None,
             "feedback_installed": self.feedback_installed,
+            "native_music_suppressed": self.native_music_suppressed,
             "wake_count": self.wake_count, "asr_count": self.asr_count,
             "listening": time.monotonic() < self.listening_until,
             "audio_bytes": self.audio_bytes, "audio_peak": self.audio_peak,
