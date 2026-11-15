@@ -38,6 +38,12 @@ class MusicTests(unittest.TestCase):
         opener.assert_not_called()
         self.assertIsNone(parse_command('暂停播放然后关灯'))
 
+    def test_repeated_identical_controls_are_one_command(self):
+        self.assertEqual(parse_command('暂停播放，暂停播放')['kind'], 'pause')
+        self.assertEqual(parse_command('暂停播放暂停播放')['kind'], 'pause')
+        self.assertEqual(parse_command('继续播放，继续播放。')['kind'], 'resume')
+        self.assertIsNone(parse_command('暂停播放，继续播放'))
+
     def test_failed_control_reports_failure_without_fake_success(self):
         controller = Mock(return_value={'ok': False, 'status': 'permission_required', 'message': '请授权'})
         result = request('暂停播放', controller=controller)

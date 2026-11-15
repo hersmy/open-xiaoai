@@ -108,7 +108,7 @@ def parse_command(text):
     text = text.rstrip("。！？!?，, ")
     bare = re.sub(r'^(?:请帮我|帮我|请)', '', text)
     for action, phrases in CONTROLS.items():
-        if bare in phrases:
+        if bare in phrases or any(re.fullmatch('(?:' + re.escape(phrase) + r'[，,\s]*){2,}', bare) for phrase in phrases):
             return {'kind': action}
     if text in {"曲库有多少首歌", "本地曲库有多少首歌"}:
         return {"kind": "count"}

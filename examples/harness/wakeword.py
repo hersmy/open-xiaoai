@@ -1,10 +1,11 @@
 """One-thread keyword spotting of speaker PCM using upstream's small KWS model."""
 from pathlib import Path
 import numpy as np
+from voice_config import WAKE_PHRASE
 
 
 class WakeWord:
-    phrase = "大爱同学"
+    phrase = WAKE_PHRASE
 
     def __init__(self, directory):
         import sherpa_onnx

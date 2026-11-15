@@ -19,6 +19,8 @@ import uuid
 
 from aiohttp import ClientSession, ClientTimeout, WSMsgType, web
 from netease_music import parse_command as music_command, request as music_request
+from feedback import prepare as prepare_feedback, install_script as feedback_install, play_script as feedback_play, open_asr_script
+from voice_config import WAKE_PHRASE
 
 ROOT = Path(__file__).resolve().parent
 DEFAULT_DSH = "/Applications/DeepSeek Harness.app/Contents/Resources/runtime/cli/bin/dsh"
@@ -211,7 +213,7 @@ class AutoRunner:
 
 
 class Bridge:
-    def __init__(self, speaker_ip, runner, spotter=None, state_dir=None):
+    def __init__(self, speaker_ip, runner, spotter=None, state_dir=None, prompts=None):
         self.speaker_ip = speaker_ip
         self.runner = runner
         self.ws = None
@@ -238,6 +240,48 @@ class Bridge:
         self.local_completed = 0
         self.last_turn = None
         self.native_recovery = None
+        self.prompts = prompts
+        self.feedback_installed = False
+        self.feedback_lock = asyncio.Lock()
+        self.wake_guard_until = 0
+        self.control_followup_until = 0
+        self.pending_question = None
+        self.last_recognition = None
+        self.listen_started = 0
+        self.last_speech_at = 0
+        self.rearm_needed = False
+        self.rearm_attempts = 0
+        self.rearm_job = None
+
+    def clear_audio(self):
+        while not self.audio_queue.empty():
+            self.audio_queue.get_nowait()
+        self.reset_kws = True
+
+    async def ensure_feedback(self):
+        async with self.feedback_lock:
+            if not self.feedback_installed:
+                if self.prompts is None:
+                    raise RuntimeError('Local feedback files are not prepared')
+                for command in feedback_install(self.prompts):
+                    result = await self.rpc('run_shell', command)
+                    if result.get('exit_code') != 0:
+                        raise RuntimeError('Local feedback installation failed')
+                self.feedback_installed = True
+
+    async def feedback(self, name):
+        await self.ensure_feedback()
+        self.speaking += 1
+        self.clear_audio()
+        try:
+            result = await self.rpc('run_shell', feedback_play(name), timeout=15)
+            if not tts_completed(result):
+                raise RuntimeError('Local feedback playback failed')
+            LOG.info('Local feedback played: %s', name)
+        finally:
+            self.speaking -= 1
+            self.wake_guard_until = time.monotonic() + .35
+            self.clear_audio()
 
     async def rpc(self, command, payload=None, timeout=35):
         ws = self.ws
@@ -275,6 +319,7 @@ class Bridge:
         ws = web.WebSocketResponse(heartbeat=20, max_msg_size=2**20)
         await ws.prepare(request)
         self.ws = ws
+        self.feedback_installed = False
         LOG.info("Speaker connected: %s", request.remote)
         hello = asyncio.create_task(self.hello())
         audio = asyncio.create_task(self.audio_worker()) if self.spotter else None
@@ -310,6 +355,9 @@ class Bridge:
                 with contextlib.suppress(asyncio.CancelledError, Exception):
                     await self.wake_job
             await self.cancel_listen_timer()
+            await self.cancel_rearm()
+            self.rearm_needed = False
+            self.rearm_attempts = 0
             hello.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await hello
@@ -334,6 +382,7 @@ class Bridge:
                     "bits_per_sample": 16, "sample_rate": 16000,
                     "period_size": 360, "buffer_size": 1440})
                 LOG.info("Speaker microphone streaming started")
+            await self.ensure_feedback()
             await self.say("语音助手已就绪。")
             LOG.info("Greeting playback completed")
         except Exception as exc:
@@ -353,7 +402,7 @@ class Bridge:
         import numpy as np
         if pcm and len(pcm) % 2 == 0:
             self.audio_peak = int(np.max(np.abs(np.frombuffer(pcm, dtype="<i2").astype(np.int32))))
-        if self.speaking or time.monotonic() < self.listening_until:
+        if self.speaking or time.monotonic() < max(self.listening_until, self.wake_guard_until):
             self.reset_kws = True
             return
         if self.audio_queue.full():
@@ -367,10 +416,10 @@ class Bridge:
             if self.reset_kws:
                 await asyncio.to_thread(self.spotter.reset)
                 self.reset_kws = False
-            if self.speaking or time.monotonic() < self.listening_until:
+            if self.speaking or time.monotonic() < max(self.listening_until, self.wake_guard_until):
                 continue
             word = await asyncio.to_thread(self.spotter.feed, pcm)
-            if word and not self.speaking and time.monotonic() >= self.listening_until:
+            if word and not self.speaking and time.monotonic() >= max(self.listening_until, self.wake_guard_until):
                 if self.wake_job is None or self.wake_job.done():
                     self.wake_count += 1
                     LOG.info("Custom wake word detected: %s", word)
@@ -380,6 +429,12 @@ class Bridge:
     async def begin_listening(self):
         try:
             await self.cancel_listen_timer()
+            await self.cancel_rearm()
+            self.rearm_needed = False
+            self.rearm_attempts = 0
+            self.listening_until = time.monotonic() + 25
+            self.control_followup_until = time.monotonic() + 20
+            self.clear_audio()
             # A fast music open can finish before PNS becomes ready. Preserve
             # that recovery when the user immediately wakes us again.
             if self.native_recovery is not None:
@@ -387,11 +442,20 @@ class Bridge:
             await self.cancel()
             self.listening_until = time.monotonic() + 25
             await self.rpc("run_shell", "mphelper pause >/dev/null 2>&1")
-            await self.say("我在。")
-            # Native ASR is opened explicitly; no spoken stock wake word needed.
-            result = await self.rpc("run_shell", "ubus call pnshelper event_notify '{\"src\":1,\"event\":0}'")
-            if result.get("exit_code") != 0:
-                raise RuntimeError("原生收音接口调用失败")
+            result = await self.rpc('run_shell', open_asr_script(), timeout=8)
+            if result.get('exit_code') != 0 or 'ASR_READY' not in result.get('stdout', ''):
+                await self.restore_native_voice()
+                result = await self.rpc('run_shell', open_asr_script(), timeout=8)
+                if result.get('exit_code') != 0 or 'ASR_READY' not in result.get('stdout', ''):
+                    raise RuntimeError('原生收音启动未确认')
+            # Fixed cached speech is bounded and cannot arrive later via cloud TTS.
+            await self.feedback('ready')
+            if self.rearm_needed:
+                await self.rearm_listening()
+                if not self.listening_until:
+                    return
+            self.listen_started = time.monotonic()
+            self.last_speech_at = 0
             self.listening_until = time.monotonic() + self.listen_timeout
             self.listen_timer = asyncio.create_task(self.wait_for_recognition())
             self.listen_timer.add_done_callback(self.observe_job)
@@ -400,6 +464,8 @@ class Bridge:
             self.listening_until = 0
             self.last_error = "Wake failed: " + str(exc)
             LOG.error("%s", self.last_error)
+            with contextlib.suppress(Exception):
+                await self.feedback('not_ready')
 
     async def cancel_listen_timer(self):
         timer, self.listen_timer = self.listen_timer, None
@@ -408,15 +474,46 @@ class Bridge:
             with contextlib.suppress(asyncio.CancelledError):
                 await timer
 
+    async def cancel_rearm(self):
+        task, self.rearm_job = self.rearm_job, None
+        if task and not task.done():
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+    async def rearm_listening(self):
+        if not self.rearm_needed or self.rearm_attempts >= 1 or not self.listening_until:
+            return
+        self.rearm_needed = False
+        self.rearm_attempts += 1
+        try:
+            result = await self.rpc('run_shell', open_asr_script(), timeout=8)
+            if result.get('exit_code') != 0 or 'ASR_READY' not in result.get('stdout', ''):
+                raise RuntimeError('Greeting-only ASR could not be rearmed')
+            self.listen_started = time.monotonic()
+            self.last_speech_at = 0
+            self.listening_until = time.monotonic() + self.listen_timeout
+            LOG.info('Rearmed ASR after greeting-only final; no second greeting')
+        except Exception as exc:
+            self.listening_until = 0
+            self.last_error = str(exc)
+            await self.feedback('not_ready')
+
     async def wait_for_recognition(self):
-        await asyncio.sleep(max(0, self.listening_until - time.monotonic()))
+        while self.listening_until:
+            deadline = min(self.listening_until,
+                           self.last_speech_at + 6 if self.last_speech_at else self.listen_started + 8)
+            delay = deadline - time.monotonic()
+            if delay <= 0:
+                break
+            await asyncio.sleep(delay)
         if not self.listening_until:
             return
         self.listening_until = 0
         self.last_error = "ASR_TIMEOUT: 唤醒后未收到最终识别文字，未向 Agent 提交命令"
         LOG.warning(self.last_error)
         with contextlib.suppress(Exception):
-            await self.say("没有收到语音识别结果，请再叫我一次，听到我在后说出问题。")
+            await self.feedback('unclear' if self.last_speech_at else 'no_input')
 
     async def restore_native_voice(self):
         # LX06 keeps frontend capture state across AIVS restarts. Restarting only
@@ -431,6 +528,7 @@ class Bridge:
         LOG.info("Native AIVS and PNS frontend recovered together")
 
     async def cancel(self):
+        self.pending_question = None
         job, self.job = self.job, None
         if job and not job.done():
             job.cancel()
@@ -440,6 +538,15 @@ class Bridge:
     async def event(self, event):
         result = recognize(event)
         if not result:
+            # Partial speech extends the timeout but never executes a command.
+            if time.monotonic() < self.listening_until:
+                try:
+                    obj = json.loads(event.get('data', {}).get('NewLine', ''))
+                    if obj.get('header', {}).get('name') == 'RecognizeResult' and any(
+                            r.get('text', '').strip() for r in obj.get('payload', {}).get('results', [])):
+                        self.last_speech_at = time.monotonic()
+                except (TypeError, ValueError, AttributeError):
+                    pass
             return
         text, identity = result
         self.asr_count += 1
@@ -450,14 +557,37 @@ class Bridge:
             self.seen[identity] = True
             if len(self.seen) > 256:
                 self.seen.pop(next(iter(self.seen)))
-        if time.monotonic() < self.listening_until:
-            self.listening_until = 0
-            await self.cancel_listen_timer()
-            question = re.sub(r"^大爱同学[，,。！!：:\s]*", "", text).strip()
+        cleaned = re.sub('^' + re.escape(WAKE_PHRASE) + r'[，,。！!：:\s]*', '', text).strip()
+        now = time.monotonic()
+        active = now < self.listening_until
+        without_echo = re.sub(r'^[哎诶唉][，,。！!：:\s]*', '', cleaned)
+        if active and without_echo != cleaned and music_command(without_echo):
+            cleaned = without_echo
+        command = music_command(cleaned)
+        if active and cleaned.rstrip('，,。！!：: ') in {'', '哎', '诶', '唉', '小爱同学'}:
+            self.last_recognition = {'decision': 'ignored_greeting'}
+            LOG.info('Ignored wake-only/greeting ASR; listening remains open')
+            self.rearm_needed = True
+            if (self.wake_job is None or self.wake_job.done()) and (self.rearm_job is None or self.rearm_job.done()):
+                self.rearm_job = asyncio.create_task(self.rearm_listening())
+                self.rearm_job.add_done_callback(self.observe_job)
+            return
+        if active:
+            question = cleaned
+            decision = 'custom_window'
+        elif now < self.control_followup_until and command and command['kind'] in {'pause', 'resume'}:
+            question = cleaned
+            decision = 'recent_wake_control'
         else:
             question = route(text)
+            decision = 'prefix' if question is not None else 'ignored_no_context'
+        self.last_recognition = {'decision': decision, 'kind': command['kind'] if command else 'other'}
         if question is None:
+            LOG.info('Final ASR ignored: %s', json.dumps(self.last_recognition))
             return
+        self.listening_until = 0
+        await self.cancel_listen_timer()
+        await self.cancel_rearm()
         LOG.info("Routed final ASR event to command dispatcher")
         # The stock wake detector can also open ASR while the custom greeting is
         # playing. Once a final question arrives, prevent the greeting task from
@@ -466,15 +596,24 @@ class Bridge:
             self.wake_job.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await self.wake_job
+        if self.job and not self.job.done() and self.last_turn and self.last_turn['route'] == 'local_music':
+            # Do not cancel PNS recovery or block the WebSocket reader on RPC.
+            self.pending_question = question
+            self.last_recognition['decision'] = 'queued_after_local_recovery'
+            LOG.info('Queued recognized command until current local recovery completes')
+            return
         await self.cancel()
         self.job = asyncio.create_task(self.dialog(question))
         self.job.add_done_callback(self.observe_job)
 
-    @staticmethod
-    def observe_job(task):
+    def observe_job(self, task):
         # dialog logs failures; retrieving the exception avoids orphan task logs.
         if not task.cancelled():
             task.exception()
+        if task is self.job and self.pending_question is not None:
+            question, self.pending_question = self.pending_question, None
+            self.job = asyncio.create_task(self.dialog(question))
+            self.job.add_done_callback(self.observe_job)
 
     async def dialog(self, question):
         started = time.monotonic()
@@ -490,9 +629,12 @@ class Bridge:
                 # opens the file; playback need not wait for frontend recovery.
                 recovery = asyncio.create_task(self.timed(metrics, 'native_recovery_ms', self.restore_native_voice()))
                 self.native_recovery = recovery
+                owned.append(recovery)
+                await self.timed(metrics, 'receipt_ms', self.feedback('received'))
+                metrics['spoken'] = True
                 playback = asyncio.create_task(self.timed(metrics, 'music_command_ms',
                     asyncio.to_thread(music_request, question)))
-                owned.extend([recovery, playback])
+                owned.append(playback)
                 result = await playback
                 local_result = result
                 metrics.update({'music_' + key: value for key, value in result.get('timing', {}).items()})
@@ -500,18 +642,28 @@ class Bridge:
                 metrics['status'] = result.get('status', 'answered' if result.get('ok') else 'failed')
                 metrics['ok'] = bool(result.get('ok'))
                 LOG.info('Local music result: %s', json.dumps(metrics))
+                if result.get('ok'):
+                    await self.timed(metrics, 'confirmation_ms', self.feedback('done'))
+                    metrics['confirmed'] = True
+                    if self.control_followup_until > started:
+                        self.control_followup_until = max(self.control_followup_until, time.monotonic() + 10)
                 await recovery
-                # A successful open is the feedback. Queries and failures need
-                # a fixed answer, never an Agent-generated confirmation.
-                metrics['spoken'] = not result.get('silent', result.get('status') == 'opened')
-                if metrics['spoken']:
+                # Fixed native prompts acknowledge successful actions. Queries
+                # and failures also need their actual result, without an Agent.
+                metrics['reply_tts'] = not result.get('silent', result.get('status') == 'opened')
+                if metrics['reply_tts']:
                     await self.timed(metrics, 'answer_tts_ms', self.say(result['message']))
                 self.completed += 1
                 self.local_completed += 1
                 if not result.get('ok'):
                     self.last_error = result['message']
                 return result['message']
-            await self.timed(metrics, 'native_recovery_ms', self.restore_native_voice())
+            recovery = asyncio.create_task(self.timed(metrics, 'native_recovery_ms', self.restore_native_voice()))
+            self.native_recovery = recovery
+            owned.append(recovery)
+            await self.timed(metrics, 'receipt_ms', self.feedback('received'))
+            metrics['spoken'] = True
+            await recovery
             if question in ("新对话", "重新开始", "清空对话"):
                 self.runner.session_id = None
                 self.runner.state_file.unlink(missing_ok=True)
@@ -523,7 +675,6 @@ class Bridge:
             if not question:
                 await self.say("我在。请说小爱同学，问助手，加上你的问题。")
                 return "等待问题"
-            await self.timed(metrics, 'thinking_tts_ms', self.say("我想一想。"))
             metrics['agent_called'] = True
             answer = await self.timed(metrics, 'agent_ms', self.run_with_feedback(question))
             await self.timed(metrics, 'answer_tts_ms', self.say(answer))
@@ -616,6 +767,8 @@ class Bridge:
             "desktop_plugin_ready": (self.runner.state_dir / "desktop.json").exists(),
             "wake_word": self.spotter.phrase if self.spotter else None,
             "local_completed_turns": self.local_completed, "last_turn": self.last_turn,
+            "last_recognition": self.last_recognition, "queued_control": self.pending_question is not None,
+            "feedback_installed": self.feedback_installed,
             "wake_count": self.wake_count, "asr_count": self.asr_count,
             "listening": time.monotonic() < self.listening_until,
             "audio_bytes": self.audio_bytes, "audio_peak": self.audio_peak,
@@ -632,6 +785,7 @@ class Bridge:
         if not isinstance(text, str) or not text.strip() or len(text) > 8000:
             raise web.HTTPBadRequest(text="Invalid text")
         self.job = asyncio.create_task(self.dialog(text.strip()))
+        self.job.add_done_callback(self.observe_job)
         try:
             answer = await self.job
         except asyncio.CancelledError:
@@ -650,7 +804,8 @@ async def serve(args):
         from wakeword import WakeWord
         spotter = await asyncio.to_thread(WakeWord, Path(args.state) / "models")
         LOG.info("Custom keyword model loaded: %s", spotter.phrase)
-    bridge = Bridge(args.speaker_ip, runner, spotter, state_dir=args.state)
+    prompts = await asyncio.to_thread(prepare_feedback, Path(args.state) / 'feedback')
+    bridge = Bridge(args.speaker_ip, runner, spotter, state_dir=args.state, prompts=prompts)
     public = web.Application(client_max_size=16384)
     public.router.add_get("/", bridge.websocket)
     local = web.Application(client_max_size=16384)

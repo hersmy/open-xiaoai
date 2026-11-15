@@ -41,6 +41,10 @@ class ProtocolTests(unittest.TestCase):
 
 
 class HarnessTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        feedback_patch = patch.object(Bridge, 'feedback', new_callable=AsyncMock)
+        self.feedback = feedback_patch.start()
+        self.addCleanup(feedback_patch.stop)
     def test_local_only_turns_keep_desktop_session_identity_after_restart(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -77,7 +81,8 @@ class HarnessTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(bridge.local_completed, 1)
         self.assertEqual(bridge.last_turn['route'], 'local_music')
         self.assertFalse(bridge.last_turn['agent_called'])
-        self.assertFalse(bridge.last_turn['spoken'])
+        self.assertTrue(bridge.last_turn['spoken'])
+        self.assertEqual(bridge.control_followup_until, 0)
 
     async def test_local_failure_is_spoken_once_without_agent_retry(self):
         runner = AsyncMock()
@@ -92,7 +97,7 @@ class HarnessTests(unittest.IsolatedAsyncioTestCase):
         runner.run.assert_not_awaited()
         self.assertEqual(bridge.last_error, result['message'])
 
-    async def test_pause_is_silent_and_does_not_call_agent(self):
+    async def test_pause_has_native_receipt_and_completion_without_agent(self):
         runner = AsyncMock()
         bridge = Bridge('192.0.2.1', runner)
         bridge.say = AsyncMock()
@@ -103,7 +108,22 @@ class HarnessTests(unittest.IsolatedAsyncioTestCase):
         execute.assert_called_once_with('暂停播放')
         runner.run.assert_not_awaited()
         bridge.say.assert_not_awaited()
-        self.assertFalse(bridge.last_turn['spoken'])
+        self.assertTrue(bridge.last_turn['spoken'])
+        self.assertEqual([call.args[0] for call in self.feedback.await_args_list], ['received', 'done'])
+
+    async def test_receipt_precedes_execution_and_completion_follows_it(self):
+        bridge = Bridge('192.0.2.1', AsyncMock())
+        bridge.restore_native_voice = AsyncMock()
+        steps = []
+        async def prompt(name):
+            steps.append(name)
+        def execute(text):
+            steps.append('execute')
+            return {'ok': True, 'status': 'controlled', 'silent': True, 'message': '已暂停'}
+        bridge.feedback = prompt
+        with patch('bridge.music_request', side_effect=execute):
+            await bridge.dialog('暂停播放')
+        self.assertEqual(steps, ['received', 'execute', 'done'])
 
     async def test_query_uses_fixed_answer_and_compound_request_uses_agent(self):
         runner = AsyncMock()
@@ -145,7 +165,7 @@ class HarnessTests(unittest.IsolatedAsyncioTestCase):
     async def test_immediate_rewake_waits_for_native_recovery_before_opening_asr(self):
         bridge = Bridge('192.0.2.1', AsyncMock())
         bridge.say = AsyncMock()
-        bridge.rpc = AsyncMock(return_value={'exit_code': 0})
+        bridge.rpc = AsyncMock(return_value={'exit_code': 0, 'stdout': 'ASR_READY'})
         release = asyncio.Event()
         async def recover():
             await release.wait()
@@ -166,7 +186,7 @@ class HarnessTests(unittest.IsolatedAsyncioTestCase):
             await wake
             await bridge.cancel_listen_timer()
             await asyncio.gather(original_job, return_exceptions=True)
-        bridge.say.assert_awaited_once_with('我在。')
+        self.assertIn(unittest.mock.call('ready'), self.feedback.await_args_list)
         self.assertTrue(any('pnshelper' in call.args[1] for call in bridge.rpc.call_args_list))
 
     async def test_slow_task_feedback_does_not_restart_agent(self):
@@ -223,8 +243,89 @@ class HarnessTests(unittest.IsolatedAsyncioTestCase):
         await bridge.wait_for_recognition()
         self.assertEqual(bridge.listening_until, 0)
         self.assertIn("ASR_TIMEOUT", bridge.last_error)
-        bridge.say.assert_awaited_once()
+        self.feedback.assert_awaited_once_with('no_input')
         runner.run.assert_not_awaited()
+
+    async def test_asr_is_confirmed_before_cached_ready_prompt(self):
+        bridge = Bridge('192.0.2.1', None)
+        bridge.rearm_attempts = 1
+        calls = []
+        async def rpc(command, script, **kwargs):
+            if 'pnshelper' in script:
+                calls.append('asr')
+            return {'exit_code': 0, 'stdout': 'ASR_READY'}
+        async def feedback(kind):
+            calls.append(kind)
+        bridge.rpc = rpc
+        bridge.feedback = feedback
+        await bridge.begin_listening()
+        await bridge.cancel_listen_timer()
+        self.assertEqual(calls, ['asr', 'ready'])
+        self.assertEqual(bridge.rearm_attempts, 0)
+
+    async def test_unconfirmed_capture_never_plays_ready_prompt(self):
+        bridge = Bridge('192.0.2.1', None)
+        bridge.rpc = AsyncMock(return_value={'exit_code': 0, 'stdout': 'ASR_NOT_CONFIRMED'})
+        bridge.restore_native_voice = AsyncMock()
+        await bridge.begin_listening()
+        bridge.restore_native_voice.assert_awaited_once()
+        self.feedback.assert_awaited_once_with('not_ready')
+        self.assertEqual(bridge.listening_until, 0)
+
+    async def test_greeting_only_final_does_not_close_listening(self):
+        bridge = Bridge('192.0.2.1', None)
+        bridge.dialog = AsyncMock()
+        bridge.rpc = AsyncMock(return_value={'exit_code': 0, 'stdout': 'ASR_READY'})
+        bridge.listening_until = time.monotonic() + 18
+        event = {'event': 'instruction', 'data': {'NewLine': json.dumps({
+            'header': {'namespace': 'SpeechRecognizer', 'name': 'RecognizeResult', 'id': 'greeting'},
+            'payload': {'is_final': True, 'results': [{'text': '你好小七'}]}})}}
+        await bridge.event(event)
+        await bridge.rearm_job
+        self.assertGreater(bridge.listening_until, time.monotonic())
+        bridge.dialog.assert_not_awaited()
+        self.assertEqual(bridge.last_recognition['decision'], 'ignored_greeting')
+        self.feedback.assert_not_awaited()
+        self.assertEqual(bridge.rearm_attempts, 1)
+
+    async def test_recent_wake_control_is_not_discarded_after_window_closes(self):
+        bridge = Bridge('192.0.2.1', None)
+        bridge.dialog = AsyncMock(return_value='完成')
+        bridge.control_followup_until = time.monotonic() + 10
+        def event(text, identity):
+            return {'event': 'instruction', 'data': {'NewLine': json.dumps({
+                'header': {'namespace': 'SpeechRecognizer', 'name': 'RecognizeResult', 'id': identity},
+                'payload': {'is_final': True, 'results': [{'text': text}]}})}}
+        await bridge.event(event('暂停播放', 'pause'))
+        await bridge.job
+        bridge.dialog.assert_awaited_once_with('暂停播放')
+        self.assertEqual(bridge.last_recognition['decision'], 'recent_wake_control')
+        bridge.dialog.reset_mock()
+        await bridge.event(event('播放音乐', 'stock-music'))
+        bridge.dialog.assert_not_awaited()
+        bridge.control_followup_until = 0
+        await bridge.event(event('暂停播放', 'stock-pause'))
+        bridge.dialog.assert_not_awaited()
+
+    async def test_local_command_is_queued_without_cancelling_recovery(self):
+        bridge = Bridge('192.0.2.1', None)
+        release = asyncio.Event()
+        previous = asyncio.create_task(release.wait())
+        bridge.job = previous
+        bridge.last_turn = {'route': 'local_music'}
+        bridge.control_followup_until = time.monotonic() + 10
+        previous.add_done_callback(bridge.observe_job)
+        bridge.dialog = AsyncMock(return_value='已暂停')
+        await bridge.event({'event': 'instruction', 'data': {'NewLine': json.dumps({
+            'header': {'namespace': 'SpeechRecognizer', 'name': 'RecognizeResult', 'id': 'queued'},
+            'payload': {'is_final': True, 'results': [{'text': '暂停播放'}]}})}})
+        self.assertFalse(previous.cancelled())
+        self.assertEqual(bridge.pending_question, '暂停播放')
+        release.set()
+        await previous
+        await asyncio.sleep(0)
+        await bridge.job
+        bridge.dialog.assert_awaited_once_with('暂停播放')
 
     async def test_received_text_cancels_timeout(self):
         bridge = Bridge("192.0.2.1", None)

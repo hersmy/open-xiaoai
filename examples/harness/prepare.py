@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import sys
 import tarfile
+from voice_config import WAKE_PHRASE, WAKE_TOKENS
 
 ROOT = Path(__file__).resolve().parent
 URL = "https://gitee.com/idootop/artifacts/releases/download/open-xiaoai-kws/kws.tar.gz"
@@ -34,11 +35,11 @@ def main():
                 raise RuntimeError("Unexpected model archive member")
             with tar.extractfile(member) as source, (models / filename).open("wb") as output:
                 shutil.copyfileobj(source, output)
-    keyword = "d à ài t óng x ué"
+    keyword = WAKE_TOKENS
     tokens = {line.split()[0] for line in (models / "tokens.txt").read_text().splitlines() if line.strip()}
     if not set(keyword.split()) <= tokens:
-        raise RuntimeError("Model tokens do not support 大爱同学")
-    (models / "keywords.txt").write_text(keyword + " :2.0 #0.35 @大爱同学\n")
+        raise RuntimeError('Model tokens do not support ' + WAKE_PHRASE)
+    (models / "keywords.txt").write_text(keyword + ' :2.0 #0.35 @' + WAKE_PHRASE + '\n')
     if sys.platform == "darwin":
         ort = importlib.util.find_spec("onnxruntime")
         sherpa = importlib.util.find_spec("sherpa_onnx")
@@ -52,7 +53,7 @@ def main():
             destination.symlink_to(library)
     from wakeword import WakeWord
     WakeWord(models)
-    print("Verified and loaded local wake model: 大爱同学")
+    print('Verified and loaded local wake model: ' + WAKE_PHRASE)
 
 
 if __name__ == "__main__":
