@@ -427,3 +427,30 @@ partial 最后活动后 10 秒超时。不同 ASR 轮片段合并，同轮修正
 最终 Python 全量 80 项、Node 5 项通过；健康接口 speaker_connected=true、feedback_installed=true、
 command_settle_seconds=3.0。用户现场停顿续说复测请求尚未返回。
 仅重载 com.zhangyichi.xiaoai-harness，模型/音色/语音会话保留；源码未涉及 Harness 内部存储。
+
+
+## 2026-11-16 续收失败误报修复与网易云冷启动
+
+用户现场反馈每次完整点歌仍报“没听清”，网易云关闭时不能启动后播放。日志确认 22:18～22:19
+四轮都已收到 final，随后 continue_capture 未确认，旧 finish_command 把可选续收失败当整句失败，
+丢弃已有的完整 final。属于本桥接上一轮引入的回归，不是用户没有说话或播放器问题。
+现保留已完成 final，等 3 秒后按原分流执行；只有裸动作/尾部“的/然后/并且/还有”等明显未完整句
+才在续收失败时提示。若后续 partial 已开始但没 final，仍不执行前段，等待超时提醒；退下立即取消保留。
+这不等于云端连续续说已修好，静默重开麦在本机仍会失败，不能宣称任意停顿都能收全。
+
+冷启动独立复现：直接 open App+歌曲 URL 返回 0、进程出现，但用户确认只打开没播放。
+修复新增 netease_player.py，先用 AppKit NSRunningApplication 查 running/finishedLaunching，
+未运行先只启动 App，等启动完成，再留 2 秒给客户端媒体处理器初始化，最后发一次 URL/文件。
+JXA 只读 AppKit 状态，不用 UI/辅助功能、computer use、账号存储或浏览器。
+注意 AppKit 桥接数值可能是字符串“0”：必须 Number(count)>0 和 Number(finishedLaunching)===1，
+不能用真值判断，否则未运行/未就绪会误判。原在线 5 秒/本地 10 秒 open 超时扩为 25 秒，
+启动失败/未就绪不发媒体请求，媒体请求超时不重发。暖启动不追加两秒等待，也不重新启动 App。
+本地和在线点歌复用同一 helper。暂停/继续保持原语义：客户端未运行时不凭空恢复未知歌曲。
+
+用户已确认修复后的冷启动自动播放了正确《如果当时》。实机观察状态顺序：
+未运行→启动进程→三次 ready=false→ready=true→2 秒缓冲→发送一次歌曲 URL，调用返回 0。
+之前“打开但没播放”的首轮不算成功，不能把 open 返回 0 当出声证明。
+85 项 Python 和 5 项 Node 测试通过；新增完整 final 不因续收失败丢弃、半句不执行、冷/暖启动顺序
+及启动失败不发送歌曲的验证。真实后台入口从网易云未运行开始验证成功：route=local_music、agent_called=false、status=opened，
+search=355.5 ms、open（含启动等待）=9743.5 ms、整轮 13765.7 ms，不含云端 ASR。
+完整语音点歌的误报修复已请用户复测，尚待回复，不视作现场验收。

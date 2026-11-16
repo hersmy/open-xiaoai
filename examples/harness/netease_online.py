@@ -10,6 +10,7 @@ import subprocess
 import time
 import urllib.parse
 import urllib.request
+from netease_player import open_media
 
 BASE = 'https://music.163.com'
 APP = '/Applications/NeteaseMusic.app'
@@ -77,7 +78,7 @@ def play_url(identity):
     return 'orpheus://' + base64.b64encode(payload.encode()).decode()
 
 
-def request(query, opener=subprocess.run, transport=fetch):
+def request(query, opener=open_media, transport=fetch):
     started = time.monotonic()
     timing = {}
 
@@ -133,7 +134,7 @@ def request(query, opener=subprocess.run, transport=fetch):
     try:
         opened = time.monotonic()
         response = opener(['/usr/bin/open', '-g', '-a', APP, play_url(song['id'])],
-                          capture_output=True, text=True, timeout=5)
+                          capture_output=True, text=True, timeout=25)
         timing['open_ms'] = round((time.monotonic() - opened) * 1000, 1)
         if response.returncode != 0:
             return result(False, 'open_failed', '网易云未接受在线播放请求，请在电脑检查播放器。')

@@ -577,13 +577,23 @@ class Bridge:
                 await asyncio.sleep(.1)
                 continue
             if getattr(self, 'continuation_failed', False):
-                self.listening_until = 0
-                await self.cancel_command_collection()
-                await self.cancel_listen_timer()
-                await self.feedback('unclear')
-                return
+                # Reopening is best effort: a failure must not discard an
+                # already complete final. Never send a bare action to Agent.
+                if self.incomplete_command(question):
+                    self.listening_until = 0
+                    await self.cancel_command_collection()
+                    await self.cancel_listen_timer()
+                    await self.feedback('unclear')
+                    return
+                LOG.info('Using completed final after optional continuation capture failed')
             await self.dispatch_question(question)
             return
+
+    @staticmethod
+    def incomplete_command(text):
+        text = text.rstrip('，,。！？!? ')
+        return bool(re.fullmatch(r'(?:请|帮我|请帮我)?(?:播放|放一下|放一首|我想听|我要听|打开|在B站播放|播放视频)', text)
+                    or text.endswith(('的', '然后', '并且', '还有')))
 
     async def cancel_listen_timer(self):
         timer, self.listen_timer = self.listen_timer, None

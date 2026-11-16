@@ -125,6 +125,25 @@ class HarnessTests(unittest.IsolatedAsyncioTestCase):
         bridge.dialog.assert_not_awaited()
         self.feedback.assert_awaited_once_with('unclear')
 
+    async def test_failed_optional_reopen_keeps_complete_final_and_executes_once(self):
+        bridge = Bridge('192.0.2.1', AsyncMock())
+        bridge.command_settle = 0
+        bridge.command_text = '播放许嵩的如果当时'
+        bridge.listening_until = time.monotonic() + 1
+        bridge.last_speech_at = time.monotonic() - 1
+        bridge.continuation_failed = True
+        bridge.dialog = AsyncMock(return_value='已播放')
+        await bridge.finish_command()
+        await bridge.job
+        bridge.dialog.assert_awaited_once_with('播放许嵩的如果当时')
+        self.feedback.assert_not_awaited()
+
+    def test_bare_actions_are_incomplete_but_known_music_and_questions_are_not(self):
+        for text in ['播放', '请帮我播放', '播放许嵩的', '打开']:
+            self.assertTrue(Bridge.incomplete_command(text))
+        for text in ['播放许嵩的如果当时', '暂停播放', '你能做什么', '播放许嵩的歌']:
+            self.assertFalse(Bridge.incomplete_command(text))
+
     async def test_dismiss_discards_collected_command_without_waiting(self):
         bridge = Bridge('192.0.2.1', AsyncMock())
         bridge.command_settle = 3

@@ -15,6 +15,7 @@ import uuid
 import tempfile
 from netease_online import request as online_request
 from voice_config import WAKE_PHRASE
+from netease_player import open_media
 
 ROOT = Path(os.getenv("XIAOAI_MUSIC_DIR", "/Volumes/PHILIPS/小米音箱/music"))
 APP = "/Applications/NeteaseMusic.app"
@@ -129,7 +130,7 @@ def parse_command(text):
     return {"kind": "play", "query": query, 'local_only': match[1].startswith(('本地', '本地的'))}
 
 
-def request(text, root=ROOT, opener=subprocess.run, state_path=None, controller=control_player,
+def request(text, root=ROOT, opener=open_media, state_path=None, controller=control_player,
             online=online_request):
     command = parse_command(text)
     if command is None:
@@ -173,7 +174,7 @@ def request(text, root=ROOT, opener=subprocess.run, state_path=None, controller=
         return {"handled": True, "ok": False, "message": "本地曲库未找到这首歌，请说出文件中的歌名或歌手。"}
     try:
         opened = time.monotonic()
-        result = opener(["/usr/bin/open", "-a", APP, song['path']], capture_output=True, text=True, timeout=10)
+        result = opener(["/usr/bin/open", "-a", APP, song['path']], capture_output=True, text=True, timeout=25)
         open_ms = round((time.monotonic() - opened) * 1000, 1)
         if result.returncode != 0:
             return {"handled": True, "ok": False, "message": "网易云未接受打开请求，请在电脑查看网易云是否正常安装。"}

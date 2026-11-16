@@ -33,6 +33,7 @@ class OnlineMusicTests(unittest.TestCase):
         payload = json.loads(base64.b64decode(args[-1].removeprefix('orpheus://')))
         self.assertEqual(payload, {'type': 'song', 'id': 167876, 'cmd': 'play'})
         self.assertNotIn('shell', opener.call_args.kwargs)
+        self.assertEqual(opener.call_args.kwargs['timeout'], 25)
         self.assertEqual(result['status'], 'opened')
 
     def test_cover_artist_and_version_never_replace_requested_original(self):
