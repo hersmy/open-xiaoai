@@ -174,7 +174,7 @@ def request(text, root=ROOT, opener=open_media, state_path=None, controller=cont
         return {"handled": True, "ok": False, "message": "本地曲库未找到这首歌，请说出文件中的歌名或歌手。"}
     try:
         opened = time.monotonic()
-        result = opener(["/usr/bin/open", "-a", APP, song['path']], capture_output=True, text=True, timeout=25)
+        result = opener(["/usr/bin/open", "-g", "-a", APP, song['path']], capture_output=True, text=True, timeout=25)
         open_ms = round((time.monotonic() - opened) * 1000, 1)
         if result.returncode != 0:
             return {"handled": True, "ok": False, "message": "网易云未接受打开请求，请在电脑查看网易云是否正常安装。"}

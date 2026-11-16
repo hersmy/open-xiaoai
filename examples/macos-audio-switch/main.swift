@@ -1,5 +1,6 @@
 import Foundation
 import CoreAudio
+import IOKit
 
 struct Output: Codable {
     let id: AudioDeviceID
@@ -42,6 +43,41 @@ struct RoutingPolicy {
         if phase == .active, let current, current != target { phase = .yielded }
         return nil
     }
+}
+
+struct LockRoutingPolicy {
+    var previous: String?
+    var yielded = false
+    var attempts = 0
+    var applied = false
+    mutating func update(locked: Bool, current: String?, display: String?, builtin: String?,
+                         preferred: String?, available: Set<String>) -> String? {
+        if !locked {
+            defer { previous = nil; yielded = false; attempts = 0; applied = false }
+            if let previous, available.contains(previous), current == builtin { return previous }
+            return nil
+        }
+        if current == preferred, preferred != nil { applied = false; return nil }
+        guard !yielded, let builtin else { return nil }
+        if previous == nil, let display, current == display { previous = display }
+        guard let previous else { return nil }
+        if current == builtin { attempts = 0; applied = true; return nil }
+        if applied { self.previous = nil; yielded = true; return nil }
+        if current != previous { self.previous = nil; yielded = true; return nil }
+        guard attempts < 5 else { return nil }
+        attempts += 1
+        return builtin
+    }
+}
+
+func screenLocked() -> Bool? {
+    let root = IORegistryGetRootEntry(kIOMainPortDefault)
+    defer { IOObjectRelease(root) }
+    guard let value = IORegistryEntryCreateCFProperty(root, "IOConsoleUsers" as CFString,
+                                                      kCFAllocatorDefault, 0)?.takeRetainedValue(),
+          let sessions = value as? [[String: Any]],
+          let session = sessions.first(where: { ($0["kCGSSessionOnConsoleKey"] as? Bool) == true }) else { return nil }
+    return (session["CGSSessionScreenIsLocked"] as? Bool) ?? false
 }
 
 struct AudioFailure: Error, CustomStringConvertible {
@@ -101,12 +137,13 @@ enum Audio {
     }
 }
 
-struct SavedState: Codable { var previous: String?; var lastAbsentOutput: String? }
+struct SavedState: Codable { var previous: String?; var lastAbsentOutput: String?; var lockRestore: String? }
 
 final class Monitor {
     let targetName: String
     let stateFile: URL
     var policy = RoutingPolicy()
+    var lockPolicy = LockRoutingPolicy()
     var pending: DispatchWorkItem?
     var timer: DispatchSourceTimer?
     var lastSummary = ""
@@ -119,6 +156,7 @@ final class Monitor {
         if let data = try? Data(contentsOf: stateFile), let saved = try? JSONDecoder().decode(SavedState.self, from: data) {
             policy.previous = saved.previous
             policy.lastAbsentOutput = saved.lastAbsentOutput
+            lockPolicy.previous = saved.lockRestore
             lastState = data
         }
     }
@@ -132,7 +170,8 @@ final class Monitor {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4, execute: task)
     }
     func save() throws {
-        let data = try JSONEncoder().encode(SavedState(previous: policy.previous, lastAbsentOutput: policy.lastAbsentOutput))
+        let data = try JSONEncoder().encode(SavedState(previous: policy.previous, lastAbsentOutput: policy.lastAbsentOutput,
+                                                     lockRestore: lockPolicy.previous))
         guard data != lastState else { return }
         try data.write(to: stateFile, options: .atomic)
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: stateFile.path)
@@ -145,9 +184,22 @@ final class Monitor {
             let matches = outputs.filter { $0.name == targetName }
             // Do not guess between identically named devices.
             guard matches.count <= 1 else { throw AudioFailure(operation: "ambiguous target", status: -1) }
-            let action = policy.update(target: matches.first?.uid, current: current?.uid,
+            var action = policy.update(target: matches.first?.uid, current: current?.uid,
                                        available: Set(outputs.map(\.uid)))
-            let summary = "phase=\(policy.phase) target_available=\(!matches.isEmpty) output=\(current?.name ?? "none")"
+            if action == matches.first?.uid, action != nil, let original = lockPolicy.previous {
+                // Headphones connecting during fallback should later restore
+                // the actual display, not the temporary built-in route.
+                policy.previous = original
+            }
+            let locked = screenLocked()
+            if action == nil, let locked {
+                let displays = outputs.filter { $0.name == "DELL S2725DSM" }
+                action = lockPolicy.update(locked: locked, current: current?.uid,
+                    display: displays.count == 1 ? displays.first?.uid : nil,
+                    builtin: outputs.first(where: { $0.uid == "BuiltInSpeakerDevice" })?.uid,
+                    preferred: matches.first?.uid, available: Set(outputs.map(\.uid)))
+            }
+            let summary = "phase=\(policy.phase) target_available=\(!matches.isEmpty) output=\(current?.name ?? "none") locked=\(locked.map(String.init) ?? "unknown") lock_fallback=\(lockPolicy.previous != nil)"
             if summary != lastSummary { log(summary); lastSummary = summary }
             try save()
             if let uid = action, let output = outputs.first(where: { $0.uid == uid }) {
@@ -172,9 +224,13 @@ final class Monitor {
             let status = AudioObjectAddPropertyListenerBlock(Audio.system, &addr, DispatchQueue.main) { [weak self] _, _ in self?.schedule() }
             guard status == noErr else { throw AudioFailure(operation: "listen", status: status) }
         }
-        // Fallback for delayed Bluetooth readiness or wake from sleep. No subprocess polling.
+        for event in ["com.apple.screenIsLocked", "com.apple.screenIsUnlocked"] {
+            DistributedNotificationCenter.default().addObserver(forName: Notification.Name(event), object: nil,
+                                                                queue: .main) { [weak self] _ in self?.schedule() }
+        }
+        // IOKit-only fallback for lock state / Bluetooth readiness; no subprocess polling.
         let timer = DispatchSource.makeTimerSource(queue: .main)
-        timer.schedule(deadline: .now() + 10, repeating: 10, leeway: .seconds(2))
+        timer.schedule(deadline: .now() + 2, repeating: 2, leeway: .milliseconds(200))
         timer.setEventHandler { [weak self] in self?.schedule() }
         self.timer = timer
         timer.resume()
@@ -211,6 +267,20 @@ func selfTest() {
     var restart = RoutingPolicy(previous: "display", lastAbsentOutput: "display")
     _ = restart.update(target: "headset", current: "headset", available: all)
     expect(restart.update(target: nil, current: "speakers", available: all) == "display", "restore across process restart")
+    var lock = LockRoutingPolicy()
+    expect(lock.update(locked: true, current: "display", display: "display", builtin: "speakers", preferred: "headset", available: all) == "speakers", "locked display falls back")
+    expect(lock.update(locked: true, current: "speakers", display: "display", builtin: "speakers", preferred: "headset", available: all) == nil, "fallback acknowledged")
+    expect(lock.update(locked: false, current: "speakers", display: "display", builtin: "speakers", preferred: "headset", available: all) == "display", "unlock restores display")
+    expect(lock.update(locked: true, current: "headset", display: "display", builtin: "speakers", preferred: "headset", available: all) == nil, "headphones preserved while locked")
+    _ = lock.update(locked: true, current: "display", display: "display", builtin: "speakers", preferred: "headset", available: all)
+    expect(lock.update(locked: true, current: "manual", display: "display", builtin: "speakers", preferred: "headset", available: all) == nil && lock.yielded, "manual route yields")
+    expect(lock.update(locked: false, current: "manual", display: "display", builtin: "speakers", preferred: "headset", available: all) == nil, "unlock does not override manual route")
+    var lockRestart = LockRoutingPolicy(previous: "display")
+    expect(lockRestart.update(locked: false, current: "speakers", display: "display", builtin: "speakers", preferred: nil, available: all) == "display", "lock restoration survives restart")
+    var manualDisplay = LockRoutingPolicy()
+    _ = manualDisplay.update(locked: true, current: "display", display: "display", builtin: "speakers", preferred: nil, available: all)
+    _ = manualDisplay.update(locked: true, current: "speakers", display: "display", builtin: "speakers", preferred: nil, available: all)
+    expect(manualDisplay.update(locked: true, current: "display", display: "display", builtin: "speakers", preferred: nil, available: all) == nil && manualDisplay.yielded, "manual return to display is respected")
     print("PASS: \(checks) routing checks")
 }
 

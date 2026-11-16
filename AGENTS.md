@@ -24,3 +24,4 @@
 - 明确 B 站视频用 examples/harness/bilibili_video.py：公共元数据搜索/查 BV，再 bilipc://page/player 原生打开，不用 computer use；标题不唯一要 BV。视频动作用 .runtime/video-actions.jsonl，opened 仅代表调用被接受；本次仅普通 UGC 第一分 P 点播，音乐暂停/继续仍是网易云。
 - 2026-11-16 收音设置在 voice_config.py：首次 12 秒、整轮 30 秒、final 后留 3 秒续说；退下立即取消。云端提前 final 后重开麦可能有间隙，失败不执行半句；开麦确认须比较最新事件，不按日志累计条数。
 - 可选续收开麦失败不得丢弃已有完整 final；只有明确半句或续说 partial 未完成才提醒。网易云冷启动必须复用 netease_player.py 先启动并确认 AppKit ready，再单次发送媒体；暖启动不固定等待，不用 UI，超时不重发。
+- 锁屏无声已定位到本机 DELL 输出路径：独立 com.zhangyichi.headphone-output 在锁屏且当前为 DELL 时切内置，解锁恢复；耳机优先、人工改选让出，不改锁屏/电源设置。管理见 examples/macos-audio-switch/README.md，勿为此重启 Harness。
