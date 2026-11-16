@@ -12,6 +12,11 @@ from voice_commands import dismiss_command
 
 
 class ProtocolTests(unittest.TestCase):
+    def test_collected_fragments_join_without_duplicating_whole_utterance(self):
+        self.assertEqual(Bridge.join_command('播放', '许嵩的如果当时'), '播放许嵩的如果当时')
+        self.assertEqual(Bridge.join_command('播放许嵩', '的如果当时'), '播放许嵩的如果当时')
+        self.assertEqual(Bridge.join_command('播放', '播放许嵩的如果当时'), '播放许嵩的如果当时')
+
     def test_dismiss_is_exact_and_does_not_swallow_other_requests(self):
         for text in ['退下', '退下吧。', '你好小七，退下', '小七，退下吧']:
             self.assertTrue(dismiss_command(text))
@@ -49,9 +54,93 @@ class ProtocolTests(unittest.TestCase):
 
 class HarnessTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
+        settle_patch = patch('bridge.COMMAND_SETTLE_SECONDS', 0)
+        settle_patch.start()
+        self.addCleanup(settle_patch.stop)
         feedback_patch = patch.object(Bridge, 'feedback', new_callable=AsyncMock)
         self.feedback = feedback_patch.start()
         self.addCleanup(feedback_patch.stop)
+
+    async def test_cloud_finals_are_collected_before_one_dispatch(self):
+        bridge = Bridge('192.0.2.1', AsyncMock())
+        bridge.command_settle = .06
+        bridge.dialog = AsyncMock(return_value='完成')
+        bridge.continue_capture = AsyncMock()
+        bridge.listening_until = time.monotonic() + 1
+        bridge.listen_started = time.monotonic()
+        def final(text, identity):
+            return {'event': 'instruction', 'data': {'NewLine': json.dumps({
+                'header': {'namespace': 'SpeechRecognizer', 'name': 'RecognizeResult',
+                           'dialog_id': identity, 'id': identity},
+                'payload': {'is_final': True, 'results': [{'text': text}]}})}}
+        await bridge.event(final('播放许嵩的歌', 'first'))
+        timer = bridge.command_timer
+        await asyncio.sleep(.025)
+        bridge.dialog.assert_not_awaited()
+        await bridge.event(final('不要现场版', 'second'))
+        await timer
+        await bridge.job
+        bridge.dialog.assert_awaited_once_with('播放许嵩的歌，不要现场版')
+        self.assertEqual(bridge.listening_until, 0)
+        self.assertIsNone(bridge.command_timer)
+
+    async def test_partial_continuation_prevents_early_execution(self):
+        bridge = Bridge('192.0.2.1', AsyncMock())
+        bridge.command_settle = .04
+        bridge.dialog = AsyncMock()
+        bridge.continue_capture = AsyncMock()
+        bridge.listening_until = time.monotonic() + .2
+        bridge.last_recognition = {}
+        await bridge.collect_command('播放许嵩的歌', {'data': {}})
+        timer = bridge.command_timer
+        bridge.last_speech_at = time.monotonic()
+        bridge.continuation_partial = True
+        await timer
+        bridge.dialog.assert_not_awaited()
+        await bridge.cancel_command_collection()
+
+    async def test_corrected_final_keeps_prior_collected_segments(self):
+        bridge = Bridge('192.0.2.1', AsyncMock())
+        bridge.command_settle = 10
+        bridge.listening_until = time.monotonic() + 30
+        bridge.last_recognition = {}
+        bridge.continue_capture = AsyncMock()
+        def event(identity):
+            return {'data': {'NewLine': json.dumps({'header': {'dialog_id': identity}})}}
+        await bridge.collect_command('播放', event('first'))
+        await bridge.collect_command('许嵩的歌', event('second'))
+        await bridge.collect_command('许嵩的如果当时', event('second'))
+        self.assertEqual(bridge.command_text, '播放许嵩的如果当时')
+        await bridge.cancel_command_collection()
+
+    async def test_failed_reopen_reminds_user_without_executing_fragment(self):
+        bridge = Bridge('192.0.2.1', AsyncMock())
+        bridge.command_settle = 0
+        bridge.command_text = '播放'
+        bridge.listening_until = time.monotonic() + 1
+        bridge.last_speech_at = time.monotonic() - 1
+        bridge.continuation_failed = True
+        bridge.dialog = AsyncMock()
+        await bridge.finish_command()
+        bridge.dialog.assert_not_awaited()
+        self.feedback.assert_awaited_once_with('unclear')
+
+    async def test_dismiss_discards_collected_command_without_waiting(self):
+        bridge = Bridge('192.0.2.1', AsyncMock())
+        bridge.command_settle = 3
+        bridge.continue_capture = AsyncMock()
+        bridge.dialog = AsyncMock(return_value='退下')
+        bridge.listening_until = time.monotonic() + 30
+        def final(text, identity):
+            return {'event': 'instruction', 'data': {'NewLine': json.dumps({
+                'header': {'namespace': 'SpeechRecognizer', 'name': 'RecognizeResult', 'id': identity},
+                'payload': {'is_final': True, 'results': [{'text': text}]}})}}
+        await bridge.event(final('播放音乐', 'first'))
+        await bridge.event(final('退下', 'dismiss'))
+        await bridge.job
+        bridge.dialog.assert_awaited_once_with('退下')
+        self.assertFalse(bridge.command_text)
+        self.assertIsNone(bridge.command_timer)
 
     async def test_dismiss_ends_capture_and_pending_control_without_agent_or_player(self):
         runner = AsyncMock()

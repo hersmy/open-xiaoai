@@ -1,8 +1,21 @@
 import unittest
-from feedback import install_script, play_script, prepare
+import subprocess
+import tempfile
+from pathlib import Path
+from feedback import install_script, play_script, prepare, open_asr_script
 
 
 class FeedbackProtocolTests(unittest.TestCase):
+    def test_asr_confirmation_survives_same_count_after_log_rotation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / 'event.log'
+            log.write_text('{"header":{"id":"old","name":"Recognize"}}\n')
+            script = open_asr_script().replace('/tmp/mico_aivs_lab/event.log', '"' + str(log) + '"')
+            stub = 'ubus() { printf \'%s\\n\' \'{"header":{"id":"new","name":"Recognize"}}\' > "' + str(log) + '"; }; '
+            result = subprocess.run(['/bin/sh', '-c', stub + script], capture_output=True, text=True, timeout=4)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn('ASR_READY', result.stdout)
+
     def test_native_prompts_are_fixed_and_synthesized_without_playing(self):
         prompts = prepare()
         self.assertEqual(prompts['ready'], '哎。')

@@ -44,9 +44,11 @@ def play_script(name):
 
 def open_asr_script():
     # A successful ubus call alone did not prove capture started on this LX06.
-    count = "grep -c '\"name\" *: *\"Recognize\"' /tmp/mico_aivs_lab/event.log 2>/dev/null"
-    return ("before=$(" + count + "); "
+    # AIVS may truncate/rotate its log between turns. Counts can stay equal or
+    # decrease even after a new Recognize; compare the latest event (unique ID).
+    latest = "grep '\"name\" *: *\"Recognize\"' /tmp/mico_aivs_lab/event.log 2>/dev/null | tail -n 1"
+    return ("before=$(" + latest + "); "
             "ubus call pnshelper event_notify '{\"src\":1,\"event\":0}' >/dev/null || exit 1; "
-            "i=0; while [ $i -lt 25 ]; do after=$(" + count + "); "
-            '[ "${after:-0}" -gt "${before:-0}" ] && { echo ASR_READY; exit 0; }; '
+            "i=0; while [ $i -lt 25 ]; do after=$(" + latest + "); "
+            '[ -n "$after" ] && [ "$after" != "$before" ] && { echo ASR_READY; exit 0; }; '
             'sleep 0.1; i=$((i+1)); done; echo ASR_NOT_CONFIRMED; exit 2')
